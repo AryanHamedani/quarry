@@ -109,6 +109,19 @@ type SiteProfile struct {
 	DiscoveredAt    time.Time              `json:"discovered_at" yaml:"discovered_at"`
 	ResponseLatency time.Duration          `json:"response_latency_ms" yaml:"response_latency_ms"`
 	EntityCounts    map[string]int         `json:"entity_counts,omitempty" yaml:"entity_counts,omitempty"`
+	Directories     []DirectoryProbeStatus `json:"directories,omitempty" yaml:"directories,omitempty"`
+}
+
+// DirectoryProbeStatus reports the accessibility and discovery status of WooCommerce, EDD, and Uploads directories/APIs.
+type DirectoryProbeStatus struct {
+	Scope        string `json:"scope" yaml:"scope"`                 // "woocommerce", "edd", "uploads"
+	Path         string `json:"path" yaml:"path"`                   // e.g. "/wp-content/uploads/woocommerce_uploads/"
+	URL          string `json:"url" yaml:"url"`                     // full URL
+	HTTPStatus   int    `json:"http_status" yaml:"http_status"`     // 200, 403, 404
+	AutoIndex    bool   `json:"auto_index" yaml:"auto_index"`       // true if open directory listing ("Index of ...") is enabled
+	APIAvailable bool   `json:"api_available" yaml:"api_available"` // true if corresponding REST API (wc/store/v1, wp/v2/product, wp/v2/download, edd-api) is active
+	APIEndpoint  string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty"`
+	APIItemCount int    `json:"api_item_count,omitempty" yaml:"api_item_count,omitempty"`
 }
 
 func (sp *SiteProfile) UnmarshalJSON(data []byte) error {
@@ -634,6 +647,7 @@ type QueryFilter struct {
 	Extensions        []string // file extension or preset filter (e.g., zip, csv, xls, xlsx, excel, archive)
 	ExcludeMediaTypes []string // media_type or MIME prefix to exclude (e.g., image, video, audio)
 	ExcludeExtensions []string // file extensions or presets to exclude (e.g., jpg, png, webp, zip)
+	DirectoryScopes   []string // optional directory/plugin scopes: "wc", "woocommerce", "edd", "uploads", "all"
 	Parent            *int
 	Slug       string
 	Fields     []string // _fields projection

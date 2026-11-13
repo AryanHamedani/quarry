@@ -118,6 +118,12 @@ func (m *Model) renderTabsAndControls() string {
 	if len(m.query.ExcludeExtensions) > 0 {
 		filterParts = append(filterParts, "exclude-ext:"+strings.Join(m.query.ExcludeExtensions, ","))
 	}
+	if len(m.query.DirectoryScopes) > 0 {
+		filterParts = append(filterParts, "dir:"+strings.Join(m.query.DirectoryScopes, ","))
+	}
+	if m.cookieHeader != "" {
+		filterParts = append(filterParts, "cookie:✓")
+	}
 	if len(m.selected) > 0 {
 		filterParts = append(filterParts, fmt.Sprintf("selected:%d", len(m.selected)))
 	}
@@ -127,6 +133,8 @@ func (m *Model) renderTabsAndControls() string {
 		controlLine = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true).Render("Search / ") + m.searchInput.View()
 	} else if m.focus == FocusFilterInput {
 		controlLine = lipgloss.NewStyle().Foreground(ColorSecondary).Bold(true).Render("Filter f ") + m.filterInput.View()
+	} else if m.focus == FocusCookieInput {
+		controlLine = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true).Render("Cookie b ") + m.cookieInput.View()
 	} else {
 		controlLine = m.styles.DescChip.Render("  Active Query: [ " + strings.Join(filterParts, " · ") + " ]")
 	}
@@ -201,8 +209,11 @@ func (m *Model) renderLeftList(width, height int) string {
 			}
 		}
 
-	case TabMedia:
+	case TabMedia, TabCommerceDirs:
 		if len(m.media) == 0 {
+			if m.activeTab == TabCommerceDirs {
+				return header + "\n\n  No WooCommerce / EDD files or products matched (use f -> dir:wc,edd,uploads)."
+			}
 			return header + "\n\n  No media attachments found."
 		}
 		start, end := visibleWindow(m.cursor, len(m.media), maxRows)
@@ -293,6 +304,14 @@ func (m *Model) renderLeftList(width, height int) string {
 			pt := prof.PostTypes[slug]
 			rows = append(rows, fmt.Sprintf("  • %-14s → /%s/%s (%s)", pt.Slug, pt.RESTNamespace, pt.RESTBase, pt.Name))
 		}
+		if len(prof.Directories) > 0 {
+			rows = append(rows, "")
+			rows = append(rows, m.styles.CategoryChip.Render("WooCommerce / EDD / Upload Directories:"))
+			for _, d := range prof.Directories {
+				rows = append(rows, fmt.Sprintf("  • %-12s HTTP %d (autoindex:%v, api:%v %s)",
+					d.Scope, d.HTTPStatus, d.AutoIndex, d.APIAvailable, d.APIEndpoint))
+			}
+		}
 	}
 
 	return header + "\n" + strings.Join(rows, "\n")
@@ -343,7 +362,7 @@ func (m *Model) refreshInspectorContent() {
 			}
 		}
 
-	case TabMedia:
+	case TabMedia, TabCommerceDirs:
 		if m.cursor >= 0 && m.cursor < len(m.media) {
 			item := m.media[m.cursor]
 			if m.inspFormat == InspectJSON {
@@ -439,15 +458,16 @@ func (m *Model) renderFooter() string {
 	}
 
 	keys := []struct{ k, d string }{
-		{"1-8", "tabs"},
+		{"1-9", "tabs"},
 		{"/", "search"},
 		{"f", "filter"},
-		{"s/o", "sort/order"},
+		{"b", "cookie"},
+		{"s/o", "sort"},
 		{"n/p", "page"},
 		{"space/a", "select"},
-		{"x/J/C", "export MD/JSON/CSV"},
-		{"D", "estimate size"},
-		{"d", "download media"},
+		{"x/J/C", "export"},
+		{"D", "size"},
+		{"d", "download"},
 		{"v", "view"},
 		{"?", "help"},
 		{"q", "quit"},
@@ -467,7 +487,7 @@ func (m *Model) renderHelpModal() string {
 	helpText := `⛏  QUARRY — KEYBOARD SHORTCUTS & FILTER GUIDE
 
 NAVIGATION & TABS
-  1..8          Switch resource tabs (Posts, Pages, Media, Categories, Tags, Users, Comments, Schema)
+  1..9          Switch tabs (Posts, Pages, Media, Categories, Tags, Users, Comments, Schema, WC/EDD Dirs)
   j / k / ↑ / ↓ Move cursor up / down in list or scroll inspector
   g / G         Jump to top / bottom of current page
   Tab / l / h   Switch focus between Resource List and Content Inspector
@@ -475,9 +495,10 @@ NAVIGATION & TABS
   S             Cycle active WordPress site (when multiple URLs provided)
   Enter         Drill down (on Category/Tag/User → filters Posts) or focus Inspector
 
-SEARCH, FILTER & SORT
-  /             Full-text keyword search across current endpoint
-  f             Advanced filter DSL (e.g. after:2025-01-01 before:2026-12-31 author:2 per_page:50)
+SEARCH, FILTER, COOKIE AUTH & SORT
+  /             Full-text keyword search across current endpoint or WC/EDD directory
+  f             Advanced filter DSL (ext:zip,csv,excel exclude-type:image dir:wc,edd,uploads after:2025-01-01)
+  b             Paste raw Cookie header value for authenticated scraping & downloads
   s             Cycle sort field (date, modified, title, id, slug, count, name)
   o             Toggle sort direction (DESC / ASC)
   Esc           Clear search filter or close modal

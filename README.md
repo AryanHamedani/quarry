@@ -154,13 +154,29 @@ quarry media https://example.com --ext zip,csv,excel --output ./media-dump
 quarry media https://example.com --type image --concurrency 12 --output ./media-dump
 ```
 
+### 6. Authenticate with a Raw `Cookie` Header & Index WooCommerce / EDD Directories
+
+```bash
+# Authenticate using a pasted browser Cookie header value (just the value)
+quarry https://example.com --cookie "wordpress_logged_in_...=...; wp_woocommerce_session_...=..."
+
+# Index, search, and export files across WooCommerce (woocommerce_uploads) & Easy Digital Downloads (edd)
+quarry dirs https://example.com --cookie "wordpress_logged_in_...=..." --search "report" --ext zip,csv,excel
+
+# Preview total download size of all non-image files in WooCommerce & EDD directories/APIs
+quarry dirs https://example.com --scope wc,edd --exclude-type image --dry-run
+
+# Bulk-download all WooCommerce & EDD files using the concurrent worker pool
+quarry dirs https://example.com --scope wc,edd --download --output ./commerce-dump
+```
+
 ---
 
 ## Interactive TUI
 
 | Key | Action |
 | :--- | :--- |
-| `1` – `8` | Switch resource tabs: **Posts**, **Pages**, **Media**, **Categories**, **Tags**, **Users**, **Comments**, **Schema/CPTs** |
+| `1` – `9` | Switch resource tabs: **Posts**, **Pages**, **Media**, **Categories**, **Tags**, **Users**, **Comments**, **Schema/CPTs**, **WC/EDD Dirs** |
 | `j` / `k` / `↑` / `↓` | Navigate items in the resource list or scroll the Content Inspector |
 | `g` / `G` | Jump to the first / last item on the current page |
 | `Tab` / `l` / `h` | Toggle focus between the **Resource List** (left) and **Content Inspector** (right) |
@@ -168,11 +184,13 @@ quarry media https://example.com --type image --concurrency 12 --output ./media-
 | `S` | Cycle through active sites when multiple WordPress URLs are loaded |
 | `Enter` | On **Category**, **Tag**, or **User** tabs: filter **Posts** by that item; on **Posts**: focus Inspector |
 | `/` | Open full-text keyword search bar |
-| `f` | Open advanced filter DSL bar (`after:YYYY-MM-DD before:YYYY-MM-DD author:1 cat:5 tag:12 per_page:50 slug:foo`) |
+| `f` | Open advanced filter DSL bar (`ext:zip,csv,excel exclude-type:image dir:wc,edd,uploads after:YYYY-MM-DD per_page:50`) |
+| `b` | Paste raw `Cookie` header value live in the TUI for authenticated REST API & directory scraping |
 | `s` / `o` | Cycle `orderby` field (`date`, `modified`, `title`, `id`, `slug`, `count`, `name`) and toggle `DESC` / `ASC` |
 | `Space` / `a` | Toggle selection on current row / Select or deselect all items on page |
 | `x` / `J` / `C` | Export selected (or current) items to **Markdown** (`x`), **JSON** (`J`), or **CSV** (`C`) |
-| `d` | Download media assets (featured images, media attachments, and inline post images) via worker pool |
+| `D` | Calculate & preview total download size before downloading (via WP metadata + HTTP `HEAD`) |
+| `d` | Download media/directory assets (featured images, attachments, WC/EDD files) via worker pool |
 | `v` | Cycle Inspector rendering mode: **Markdown** → **Raw HTML** → **REST JSON** |
 | `?` | Toggle keyboard shortcuts & filter syntax reference modal |
 | `q` / `Ctrl+C` | Quit Quarry |
@@ -187,17 +205,20 @@ Usage:
   quarry [command]
 
 Available Commands:
+  dirs        Index, search, and download files from WooCommerce (woocommerce_uploads), EDD (edd), and Uploads directories (aliases: wc, edd)
   inspect     Discover WordPress REST API capabilities, namespaces, custom post types, taxonomies, and counts
   query       Search, filter, and sort any WordPress REST API endpoint non-interactively
   export      Mass-extract posts, pages, taxonomies, and optionally all media from WordPress sites
-  media       Bulk-download media attachments (images, videos, audio, documents) via concurrent worker pool
+  media       Bulk-download media attachments and WooCommerce/EDD files via concurrent worker pool
   tui         Launch the interactive Terminal UI (TUI) explorer for one or more WordPress sites
 
 Global Flags:
       --app-password string   Optional WordPress Application Password
   -c, --concurrency int       Concurrent worker pool size for media downloads (default 6)
+  -b, --cookie string         Raw Cookie header value (just the value) for cookie-authenticated scraping & downloads
   -f, --format string         Output format: markdown, json, jsonl, csv, html (default "markdown")
   -k, --insecure              Skip TLS certificate verification
+      --nonce string          Optional X-WP-Nonce header for cookie-authenticated WordPress REST API endpoints
   -o, --output string         Output directory or file path for extracted data and media (default "./quarry-output")
   -q, --quiet                 Suppress progress logs on stderr (for clean stdout piping)
       --rate-limit float      Max REST API requests per second per site (default 8)

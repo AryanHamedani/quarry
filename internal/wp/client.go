@@ -23,6 +23,8 @@ type ClientOptions struct {
 	BearerToken     string
 	BasicUser       string
 	BasicAppPass    string
+	CookieHeader    string // Raw Cookie header value (e.g. "wordpress_logged_in_...=...; wp-settings-1=...")
+	WPNonce         string // Optional X-WP-Nonce for cookie-authenticated REST API requests
 	MaxRetries      int
 	RequestsPerSec  float64
 	InsecureSkipTLS bool
@@ -124,6 +126,20 @@ func NewClient(rawURL string, opts ClientOptions) (*Client, error) {
 func (c *Client) BaseURL() string { return c.baseURL }
 func (c *Client) APIRoot() string { return c.apiRoot }
 
+// SetCookieHeader updates the live Cookie header value used for all subsequent requests.
+func (c *Client) SetCookieHeader(rawCookie string) {
+	c.rateMu.Lock()
+	c.opts.CookieHeader = NormalizeCookieValue(rawCookie)
+	c.rateMu.Unlock()
+}
+
+// CookieHeader returns the normalized Cookie header value currently configured on the client.
+func (c *Client) CookieHeader() string {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
+	return NormalizeCookieValue(c.opts.CookieHeader)
+}
+
 func (c *Client) waitRateLimit(ctx context.Context) error {
 	if c.minDelay <= 0 {
 		return nil
@@ -187,9 +203,27 @@ func (c *Client) decorateRequest(req *http.Request) {
 		cred := base64.StdEncoding.EncodeToString([]byte(c.opts.BasicUser + ":" + c.opts.BasicAppPass))
 		req.Header.Set("Authorization", "Basic "+cred)
 	}
+	if cookie := c.CookieHeader(); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	if nonce := strings.TrimSpace(c.opts.WPNonce); nonce != "" {
+		req.Header.Set("X-WP-Nonce", nonce)
+	}
 	for k, v := range c.opts.CustomHeaders {
 		req.Header.Set(k, v)
 	}
+}
+
+// NormalizeCookieValue cleans a user-pasted Cookie header value, stripping any accidental leading "Cookie:" prefix.
+func NormalizeCookieValue(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(s), "cookie:") {
+		s = strings.TrimSpace(s[len("cookie:"):])
+	}
+	return s
 }
 
 func (c *Client) doWithRetry(ctx context.Context, targetURL string) (*http.Response, time.Duration, error) {
@@ -397,6 +431,21 @@ func (c *Client) enrichProfile(ctx context.Context, profile *SiteProfile) {
 			}
 		}()
 	}
+
+	// Probe WooCommerce, Easy Digital Downloads (EDD), and Upload Directories
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		dirs := c.ProbeDirectories(ctx)
+		mu.Lock()
+		profile.Directories = dirs
+		for _, d := range dirs {
+			if d.APIItemCount > 0 {
+				profile.EntityCounts[d.Scope] = d.APIItemCount
+			}
+		}
+		mu.Unlock()
+	}()
 
 	wg.Wait()
 }

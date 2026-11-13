@@ -359,3 +359,111 @@ func TestPHPPolymorphicJSONResilience(t *testing.T) {
 		t.Errorf("unexpected size sp-found-01 coercion: %+v", sz)
 	}
 }
+
+func TestCookieHeaderAuthenticationAndDirectories(t *testing.T) {
+	if got := NormalizeCookieValue("Cookie: wordpress_logged_in_abc=123; wp-settings=1"); got != "wordpress_logged_in_abc=123; wp-settings=1" {
+		t.Fatalf("NormalizeCookieValue failed: got %q", got)
+	}
+
+	const expectedCookie = "wordpress_logged_in_xyz=secret_session; wp_woocommerce_session_1=abc"
+	var sawCookieOnAPI, sawCookieOnDir bool
+
+	mux := http.NewServeMux()
+	var baseURL string
+
+	mux.HandleFunc("/wp-content/uploads/woocommerce_uploads/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cookie") == expectedCookie {
+			sawCookieOnDir = true
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><title>Index of /wp-content/uploads/woocommerce_uploads</title></head>
+<body><h1>Index of /wp-content/uploads/woocommerce_uploads</h1>
+<pre>
+<a href="../">Parent Directory</a>
+<a href="2026/">2026/</a>                       2026-11-14 01:00    -
+<a href="wc-catalog-export.xlsx">wc-catalog-export.xlsx</a>  2026-11-14 01:10  2.5M
+<a href="banner.jpg">banner.jpg</a>              2026-11-14 01:11  120K
+</pre></body></html>`))
+	})
+
+	mux.HandleFunc("/wp-content/uploads/woocommerce_uploads/2026/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><title>Index of /wp-content/uploads/woocommerce_uploads/2026</title></head>
+<body><a href="../">Parent Directory</a>
+<a href="vip-customers.csv">vip-customers.csv</a> 2026-11-14 01:15 512K
+</body></html>`))
+	})
+
+	mux.HandleFunc("/wp-content/uploads/edd/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><title>Index of /wp-content/uploads/edd</title></head>
+<body><h1>Index of /wp-content/uploads/edd</h1>
+<a href="ebook-bundle.zip">ebook-bundle.zip</a> 2026-11-14 01:20 15M
+</body></html>`))
+	})
+
+	mux.HandleFunc("/wp-json/wc/store/v1/products", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cookie") == expectedCookie {
+			sawCookieOnAPI = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-WP-Total", "1")
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":          501,
+				"name":        "Enterprise Database Dump",
+				"slug":        "enterprise-db-dump",
+				"permalink":   baseURL + "/product/enterprise-db-dump",
+				"description": `<p>Download sample <a href="` + baseURL + `/wp-content/uploads/woocommerce_uploads/sample-data.zip">sample-data.zip</a></p>`,
+			},
+		})
+	})
+
+	mux.HandleFunc("/wp-json/wp/v2/media", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-WP-Total", "0")
+		w.Header().Set("X-WP-TotalPages", "0")
+		_ = json.NewEncoder(w).Encode([]any{})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	baseURL = srv.URL
+
+	opts := DefaultClientOptions()
+	opts.RequestsPerSec = 0
+	opts.CookieHeader = "Cookie: " + expectedCookie
+	cli, err := NewClient(srv.URL, opts)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// 1. Test ProbeDirectories
+	probes := cli.ProbeDirectories(context.Background())
+	if len(probes) < 2 || !probes[0].AutoIndex || !probes[0].APIAvailable {
+		t.Fatalf("expected WooCommerce directory probe to report AutoIndex=true and APIAvailable=true, got %+v", probes)
+	}
+
+	// 2. Test ScanDirectories with ExcludeMediaTypes=["image"] (should return 4 non-image files: xlsx, csv, zip from EDD, zip from WC product)
+	qf := DefaultQueryFilter("woocommerce")
+	qf.DirectoryScopes = []string{"wc", "edd"}
+	qf.ExcludeMediaTypes = []string{"image"}
+
+	items, _, err := cli.ScanDirectories(context.Background(), qf, nil)
+	if err != nil {
+		t.Fatalf("ScanDirectories: %v", err)
+	}
+	if !sawCookieOnAPI || !sawCookieOnDir {
+		t.Errorf("expected Cookie header to be sent on both REST API (%v) and directory crawler (%v)", sawCookieOnAPI, sawCookieOnDir)
+	}
+	if len(items) != 4 {
+		t.Fatalf("expected 4 non-image files across WooCommerce & EDD directories/APIs, got %d: %+v", len(items), items)
+	}
+
+	// 3. Test Search filter inside ScanDirectories
+	qf.Search = "vip-customers"
+	searched, _, err := cli.ScanDirectories(context.Background(), qf, nil)
+	if err != nil || len(searched) != 1 || !strings.HasSuffix(searched[0].SourceURL, "vip-customers.csv") {
+		t.Fatalf("expected search 'vip-customers' to return 1 CSV item, got %+v (err=%v)", searched, err)
+	}
+}

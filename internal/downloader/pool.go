@@ -3,6 +3,7 @@ package downloader
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -62,12 +63,34 @@ type ProgressUpdate struct {
 
 // PoolOptions configures the concurrent media downloader pool.
 type PoolOptions struct {
-	Concurrency int
-	OutputDir   string
-	FlatLayout  bool // if false, preserves year/month or wp-content/uploads relative structure
-	Resume      bool // skip existing non-empty files
-	Timeout     time.Duration
-	UserAgent   string
+	Concurrency     int
+	OutputDir       string
+	FlatLayout      bool // if false, preserves year/month or wp-content/uploads relative structure
+	Resume          bool // skip existing non-empty files
+	Timeout         time.Duration
+	UserAgent       string
+	CookieHeader    string // Optional raw Cookie header value for authenticated downloads
+	BearerToken     string // Optional Bearer token for authenticated downloads
+	InsecureSkipTLS bool
+	CustomHeaders   map[string]string
+}
+
+func decorateDownloadRequest(req *http.Request, opts PoolOptions) {
+	req.Header.Set("User-Agent", opts.UserAgent)
+	if c := strings.TrimSpace(opts.CookieHeader); c != "" {
+		if strings.HasPrefix(strings.ToLower(c), "cookie:") {
+			c = strings.TrimSpace(c[len("cookie:"):])
+		}
+		if c != "" {
+			req.Header.Set("Cookie", c)
+		}
+	}
+	if opts.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.BearerToken)
+	}
+	for k, v := range opts.CustomHeaders {
+		req.Header.Set(k, v)
+	}
 }
 
 func DefaultPoolOptions(outDir string) PoolOptions {
@@ -121,13 +144,17 @@ func DownloadBatch(ctx context.Context, tasks []AssetTask, opts PoolOptions, onP
 		return Summary{Duration: time.Since(start)}, nil
 	}
 
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: opts.Concurrency * 2,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	if opts.InsecureSkipTLS {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
 	client := &http.Client{
-		Timeout: opts.Timeout,
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: opts.Concurrency * 2,
-			IdleConnTimeout:     90 * time.Second,
-		},
+		Timeout:   opts.Timeout,
+		Transport: transport,
 	}
 
 	taskCh := make(chan AssetTask, total)
@@ -266,7 +293,7 @@ func downloadOne(ctx context.Context, client *http.Client, task AssetTask, opts 
 		res.Err = err
 		return res
 	}
-	req.Header.Set("User-Agent", opts.UserAgent)
+	decorateDownloadRequest(req, opts)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -361,13 +388,17 @@ func EstimateBatchSize(ctx context.Context, tasks []AssetTask, opts PoolOptions,
 		opts.UserAgent = DefaultPoolOptions(opts.OutputDir).UserAgent
 	}
 
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: opts.Concurrency * 2,
+		IdleConnTimeout:     60 * time.Second,
+	}
+	if opts.InsecureSkipTLS {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
 	client := &http.Client{
-		Timeout: opts.Timeout,
-		Transport: &http.Transport{
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: opts.Concurrency * 2,
-			IdleConnTimeout:     60 * time.Second,
-		},
+		Timeout:   opts.Timeout,
+		Transport: transport,
 	}
 
 	type idxTask struct {
@@ -406,7 +437,7 @@ func EstimateBatchSize(ctx context.Context, tasks []AssetTask, opts PoolOptions,
 					}
 					req, err := http.NewRequestWithContext(ctx, http.MethodHead, item.task.SourceURL, nil)
 					if err == nil {
-						req.Header.Set("User-Agent", opts.UserAgent)
+						decorateDownloadRequest(req, opts)
 						if resp, err := client.Do(req); err == nil {
 							_ = resp.Body.Close()
 							if resp.ContentLength > 0 {

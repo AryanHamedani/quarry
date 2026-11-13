@@ -28,6 +28,7 @@ const (
 	TabUsers
 	TabComments
 	TabCustomTypes
+	TabCommerceDirs
 )
 
 var tabLabels = []struct {
@@ -44,6 +45,7 @@ var tabLabels = []struct {
 	{TabUsers, "6", "Users", "users"},
 	{TabComments, "7", "Comments", "comments"},
 	{TabCustomTypes, "8", "Schema/CPTs", "types"},
+	{TabCommerceDirs, "9", "WC/EDD Dirs", "woocommerce"},
 }
 
 type FocusPane int
@@ -53,6 +55,7 @@ const (
 	FocusInspector
 	FocusSearchInput
 	FocusFilterInput
+	FocusCookieInput
 )
 
 type InspectorFormat int
@@ -143,12 +146,14 @@ type Model struct {
 
 	searchInput textinput.Model
 	filterInput textinput.Model
+	cookieInput textinput.Model
 	inspector   viewport.Model
 	spin        spinner.Model
 
-	showHelp   bool
-	outputDir  string
-	concurrent int
+	showHelp     bool
+	outputDir    string
+	concurrent   int
+	cookieHeader string
 }
 
 // NewModel creates a new Quarry TUI model for one or more WordPress sites.
@@ -181,9 +186,17 @@ func NewModel(ctx context.Context, urls []string, clientOpts wp.ClientOptions, o
 	si.Width = 42
 
 	fi := textinput.New()
-	fi.Placeholder = "Filter: ext:zip,csv,excel mime:application/pdf after:2025-01-01 author:1 per_page:50"
-	fi.CharLimit = 200
+	fi.Placeholder = "Filter: ext:zip,csv,excel exclude-type:image dir:wc,edd after:2025-01-01 per_page:50"
+	fi.CharLimit = 240
 	fi.Width = 65
+
+	ci := textinput.New()
+	ci.Placeholder = "Paste raw Cookie header value (e.g. wordpress_logged_in_...=...; wp_woocommerce_session_...=...)"
+	ci.CharLimit = 4096
+	ci.Width = 68
+	if clientOpts.CookieHeader != "" {
+		ci.SetValue(wp.NormalizeCookieValue(clientOpts.CookieHeader))
+	}
 
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
@@ -205,10 +218,12 @@ func NewModel(ctx context.Context, urls []string, clientOpts wp.ClientOptions, o
 		selected:     make(map[int]bool),
 		searchInput:  si,
 		filterInput:  fi,
+		cookieInput:  ci,
 		inspector:    vp,
 		spin:         sp,
 		outputDir:    outDir,
 		concurrent:   concurrency,
+		cookieHeader: wp.NormalizeCookieValue(clientOpts.CookieHeader),
 	}
 	return m, nil
 }
@@ -267,6 +282,9 @@ func (m *Model) fetchCurrentTabCmd() tea.Cmd {
 			return dataLoadedMsg{siteIdx: siteIdx, tab: tab, comments: items, meta: meta, err: err}
 		case TabCustomTypes:
 			return dataLoadedMsg{siteIdx: siteIdx, tab: tab}
+		case TabCommerceDirs:
+			items, meta, err := client.ScanDirectories(ctx, q, nil)
+			return dataLoadedMsg{siteIdx: siteIdx, tab: tab, media: items, meta: meta, err: err}
 		}
 		return dataLoadedMsg{siteIdx: siteIdx, tab: tab}
 	}
@@ -283,10 +301,10 @@ func (m *Model) exportCurrentSelectionCmd(format exporter.Format) tea.Cmd {
 	mediaToExport := m.selectedOrCurrentMedia()
 
 	return func() tea.Msg {
-		if tab == TabMedia {
+		if tab == TabMedia || tab == TabCommerceDirs {
 			out, err := exporter.ExportMediaCatalog(mediaToExport, format, filepath.Join(outBase, "media-catalog."+string(format)))
 			return exportFinishedMsg{
-				description: fmt.Sprintf("Exported %d media records (%s)", len(mediaToExport), format),
+				description: fmt.Sprintf("Exported %d media/directory records (%s)", len(mediaToExport), format),
 				outputPath:  out,
 				err:         err,
 			}
@@ -323,6 +341,7 @@ func (m *Model) downloadMediaCmd() tea.Cmd {
 		}
 		opts := downloader.DefaultPoolOptions(mediaDir)
 		opts.Concurrency = conc
+		opts.CookieHeader = m.cookieHeader
 		summary, err := downloader.DownloadBatch(ctx, tasks, opts, nil)
 		return downloadFinishedMsg{
 			summary: summary,
@@ -343,6 +362,7 @@ func (m *Model) estimateMediaSizeCmd() tea.Cmd {
 		}
 		opts := downloader.DefaultPoolOptions(m.outputDir)
 		opts.Concurrency = conc
+		opts.CookieHeader = m.cookieHeader
 		est := downloader.EstimateBatchSize(ctx, tasks, opts, true, nil)
 		return sizeEstimatedMsg{estimate: est}
 	}
@@ -351,7 +371,7 @@ func (m *Model) estimateMediaSizeCmd() tea.Cmd {
 func (m *Model) collectMediaTasksForSelection() []downloader.AssetTask {
 	var tasks []downloader.AssetTask
 	switch m.activeTab {
-	case TabMedia:
+	case TabMedia, TabCommerceDirs:
 		items := m.selectedOrCurrentMedia()
 		for _, item := range items {
 			if item.SourceURL != "" {
@@ -559,6 +579,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Handle Cookie header input mode
+		if m.focus == FocusCookieInput {
+			switch msg.String() {
+			case "esc":
+				m.focus = FocusList
+				m.cookieInput.Blur()
+				return m, nil
+			case "enter":
+				m.focus = FocusList
+				m.cookieInput.Blur()
+				m.cookieHeader = wp.NormalizeCookieValue(m.cookieInput.Value())
+				for i := range m.sites {
+					m.sites[i].Client.SetCookieHeader(m.cookieHeader)
+				}
+				m.query.Page = 1
+				m.loading = true
+				if m.cookieHeader != "" {
+					m.loadingLabel = "Applied Cookie header — refreshing authenticated view..."
+				} else {
+					m.loadingLabel = "Cleared Cookie header — refreshing view..."
+				}
+				return m, tea.Batch(m.spin.Tick, m.discoverSiteCmd(m.activeSite), m.fetchCurrentTabCmd())
+			default:
+				var cmd tea.Cmd
+				m.cookieInput, cmd = m.cookieInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		// Global shortcuts
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -587,6 +636,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = FocusFilterInput
 			m.filterInput.Focus()
 			return m, textinput.Blink
+		case "b":
+			m.focus = FocusCookieInput
+			m.cookieInput.Focus()
+			return m, textinput.Blink
 		case "tab", "l", "right":
 			if m.focus == FocusList {
 				m.focus = FocusInspector
@@ -610,7 +663,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, tea.Batch(cmds...)
 			}
-		case "1", "2", "3", "4", "5", "6", "7", "8":
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			idx := int(msg.String()[0] - '1')
 			if idx >= 0 && idx < len(tabLabels) {
 				newTab := tabLabels[idx].tab
@@ -761,7 +814,7 @@ func (m *Model) currentListLen() int {
 	switch m.activeTab {
 	case TabPosts, TabPages:
 		return len(m.posts)
-	case TabMedia:
+	case TabMedia, TabCommerceDirs:
 		return len(m.media)
 	case TabCategories, TabTags:
 		return len(m.terms)
@@ -793,7 +846,7 @@ func (m *Model) toggleSelectAllOnPage() {
 		for _, p := range m.posts {
 			ids = append(ids, p.ID)
 		}
-	case TabMedia:
+	case TabMedia, TabCommerceDirs:
 		for _, item := range m.media {
 			ids = append(ids, item.ID)
 		}
@@ -823,7 +876,7 @@ func (m *Model) currentItemID() int {
 		if m.cursor >= 0 && m.cursor < len(m.posts) {
 			return m.posts[m.cursor].ID
 		}
-	case TabMedia:
+	case TabMedia, TabCommerceDirs:
 		if m.cursor >= 0 && m.cursor < len(m.media) {
 			return m.media[m.cursor].ID
 		}
@@ -893,6 +946,8 @@ func (m *Model) applyFilterDSL(input string) {
 			m.query.ExcludeMediaTypes = strings.Split(v, ",")
 		case "exclude-ext", "not-ext", "!ext":
 			m.query.ExcludeExtensions = strings.Split(v, ",")
+		case "dir", "dirs", "source", "scope":
+			m.query.DirectoryScopes = strings.Split(v, ",")
 		case "type":
 			if strings.HasPrefix(v, "!") || strings.HasPrefix(v, "-") {
 				m.query.ExcludeMediaTypes = strings.Split(strings.TrimLeft(v, "!-"), ",")

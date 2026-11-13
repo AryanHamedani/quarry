@@ -20,20 +20,22 @@ import (
 )
 
 // Version is injected at build time via -ldflags.
-var Version = "0.2.2"
+var Version = "0.3.0"
 
 type GlobalFlags struct {
-	SitesFile   string
-	OutputDir   string
-	Format      string
-	Concurrency int
-	RateLimit   float64
-	Timeout     time.Duration
-	BearerToken string
-	User        string
-	AppPassword string
-	Insecure    bool
-	Quiet       bool
+	SitesFile    string
+	OutputDir    string
+	Format       string
+	Concurrency  int
+	RateLimit    float64
+	Timeout      time.Duration
+	BearerToken  string
+	User         string
+	AppPassword  string
+	CookieHeader string
+	WPNonce      string
+	Insecure     bool
+	Quiet        bool
 }
 
 // NewRootCommand constructs the complete Cobra CLI tree for Quarry.
@@ -73,6 +75,8 @@ automation, scripting, and full-site archiving.`,
 	pf.StringVar(&gf.BearerToken, "token", "", "Optional JWT / Bearer token for authenticated REST API endpoints")
 	pf.StringVar(&gf.User, "user", "", "Optional WordPress username for Application Password auth")
 	pf.StringVar(&gf.AppPassword, "app-password", "", "Optional WordPress Application Password")
+	pf.StringVarP(&gf.CookieHeader, "cookie", "b", "", "Raw Cookie header value (just the value) for cookie-authenticated scraping & downloads")
+	pf.StringVar(&gf.WPNonce, "nonce", "", "Optional X-WP-Nonce header for cookie-authenticated WordPress REST API endpoints")
 	pf.BoolVarP(&gf.Insecure, "insecure", "k", false, "Skip TLS certificate verification")
 	pf.BoolVarP(&gf.Quiet, "quiet", "q", false, "Suppress progress logs on stderr (for clean stdout piping)")
 
@@ -82,6 +86,7 @@ automation, scripting, and full-site archiving.`,
 		newQueryCmd(&gf),
 		newExportCmd(&gf),
 		newMediaCmd(&gf),
+		newDirsCmd(&gf),
 	)
 
 	return rootCmd
@@ -94,6 +99,17 @@ func buildClientOptions(gf GlobalFlags) wp.ClientOptions {
 	opts.BearerToken = gf.BearerToken
 	opts.BasicUser = gf.User
 	opts.BasicAppPass = gf.AppPassword
+	opts.CookieHeader = wp.NormalizeCookieValue(gf.CookieHeader)
+	opts.WPNonce = strings.TrimSpace(gf.WPNonce)
+	opts.InsecureSkipTLS = gf.Insecure
+	return opts
+}
+
+func buildPoolOptions(gf GlobalFlags, outDir string) downloader.PoolOptions {
+	opts := downloader.DefaultPoolOptions(outDir)
+	opts.Concurrency = gf.Concurrency
+	opts.CookieHeader = wp.NormalizeCookieValue(gf.CookieHeader)
+	opts.BearerToken = gf.BearerToken
 	opts.InsecureSkipTLS = gf.Insecure
 	return opts
 }
@@ -246,6 +262,17 @@ func printProfileSummary(p *wp.SiteProfile) {
 		}
 		fmt.Printf("  Post Types  : %s\n", strings.Join(cpts, ", "))
 	}
+	if len(p.Directories) > 0 {
+		fmt.Println("  Directories :")
+		for _, d := range p.Directories {
+			apiInfo := "none"
+			if d.APIAvailable {
+				apiInfo = fmt.Sprintf("%s (%d items)", d.APIEndpoint, d.APIItemCount)
+			}
+			fmt.Printf("    • %-12s %-42s HTTP %d (autoindex: %v, API: %s)\n",
+				d.Scope, d.Path, d.HTTPStatus, d.AutoIndex, apiInfo)
+		}
+	}
 	fmt.Println()
 }
 
@@ -266,10 +293,11 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 		mediaType   string
 		excludeType string
 		excludeExt  string
+		dirFilter   string
 		perPage     int
-		maxPages   int
-		maxItems   int
-		allPages   bool
+		maxPages    int
+		maxItems    int
+		allPages    bool
 	)
 
 	cmd := &cobra.Command{
@@ -309,6 +337,9 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 			if excludeExt != "" {
 				qf.ExcludeExtensions = strings.Split(excludeExt, ",")
 			}
+			if dirFilter != "" {
+				qf.DirectoryScopes = strings.Split(dirFilter, ",")
+			}
 			if authorID > 0 {
 				qf.Author = []int{authorID}
 			}
@@ -337,6 +368,21 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 				}
 
 				switch resource {
+				case "wc", "woocommerce", "edd", "dirs", "directories":
+					if len(qf.DirectoryScopes) == 0 && (resource == "wc" || resource == "woocommerce" || resource == "edd") {
+						qf.DirectoryScopes = []string{resource}
+					}
+					items, _, err := cli.ScanDirectories(cmd.Context(), qf, progress)
+					if !gf.Quiet {
+						fmt.Fprintln(os.Stderr)
+					}
+					if err != nil {
+						return err
+					}
+					if err := outputMediaResult(items, exporter.Format(strings.ToLower(gf.Format)), gf.OutputDir, cmd.Flags().Changed("output")); err != nil {
+						return err
+					}
+
 				case "media":
 					var items []wp.MediaItem
 					if allPages {
@@ -440,6 +486,7 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 	f.StringVar(&mediaType, "type", "", "Filter media by WP media_type: image, file, video, audio, text, application (comma-separated)")
 	f.StringVar(&excludeType, "exclude-type", "", "Exclude media_type(s), e.g. --exclude-type image (or image,video)")
 	f.StringVar(&excludeExt, "exclude-ext", "", "Exclude file extension(s) or presets, e.g. --exclude-ext jpg,png,webp")
+	f.StringVar(&dirFilter, "dir", "", "Filter media by directory/plugin scope: wc, woocommerce, edd, uploads, all")
 	f.IntVar(&perPage, "per-page", 25, "Items per page (1..100)")
 	f.BoolVar(&allPages, "all", false, "Automatically paginate through all available pages")
 	f.IntVar(&maxPages, "max-pages", 0, "Maximum number of pages to fetch when --all is set (0 = unlimited)")
@@ -581,8 +628,7 @@ func newExportCmd(gf *GlobalFlags) *cobra.Command {
 
 					if len(inlineMediaTasks) > 0 {
 						mediaOut := filepath.Join(siteOutDir, "media")
-						poolOpts := downloader.DefaultPoolOptions(mediaOut)
-						poolOpts.Concurrency = gf.Concurrency
+						poolOpts := buildPoolOptions(*gf, mediaOut)
 						summary, err := downloader.DownloadBatch(cmd.Context(), inlineMediaTasks, poolOpts, func(u downloader.ProgressUpdate) {
 							if !gf.Quiet {
 								mb := float64(u.TotalBytes) / (1024 * 1024)
@@ -620,6 +666,7 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 		mediaType   string
 		excludeType string
 		excludeExt  string
+		dirScope    string
 		dryRun      bool
 		search      string
 		flatLayout  bool
@@ -630,9 +677,10 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "media <site-url...>",
-		Short: "Bulk-download media attachments (images, archives, spreadsheets, videos, documents) via concurrent worker pool",
+		Short: "Bulk-download media attachments and WooCommerce/EDD files via concurrent worker pool",
 		Example: `  quarry media https://example.com --exclude-type image --dry-run
   quarry media https://example.com --exclude-type image --output ./downloads
+  quarry media https://example.com --dir wc,edd --cookie "wordpress_logged_in_...=..." --output ./downloads
   quarry media https://example.com --ext zip,csv,excel --output ./downloads
   quarry media https://example.com --type image --concurrency 12 --output ./media-dump`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -664,17 +712,29 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 				if excludeExt != "" {
 					qf.ExcludeExtensions = strings.Split(excludeExt, ",")
 				}
+				if dirScope != "" {
+					qf.DirectoryScopes = strings.Split(dirScope, ",")
+				}
 				qf.MediaType = mediaType
 				qf.Search = search
 				qf.MaxPages = maxPages
 				qf.MaxItems = maxItems
 
-				items, err := cli.FetchAllMedia(cmd.Context(), qf, func(page, totalPages, fetched, total int) {
+				var items []wp.MediaItem
+				if len(qf.DirectoryScopes) > 0 {
 					if !gf.Quiet {
-						fmt.Fprintf(os.Stderr, "\r⛏  [%s] Discovering media page %d/%d (%d/%d)...",
-							cli.BaseURL(), page, totalPages, fetched, total)
+						fmt.Fprintf(os.Stderr, "⛏  [%s] Indexing & searching directories (%s) + REST APIs...",
+							cli.BaseURL(), strings.Join(qf.DirectoryScopes, ","))
 					}
-				})
+					items, _, err = cli.ScanDirectories(cmd.Context(), qf, nil)
+				} else {
+					items, err = cli.FetchAllMedia(cmd.Context(), qf, func(page, totalPages, fetched, total int) {
+						if !gf.Quiet {
+							fmt.Fprintf(os.Stderr, "\r⛏  [%s] Discovering media page %d/%d (%d/%d)...",
+								cli.BaseURL(), page, totalPages, fetched, total)
+						}
+					})
+				}
 				if !gf.Quiet {
 					fmt.Fprintln(os.Stderr)
 				}
@@ -696,8 +756,7 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 					}
 				}
 
-				opts := downloader.DefaultPoolOptions(mediaDir)
-				opts.Concurrency = gf.Concurrency
+				opts := buildPoolOptions(*gf, mediaDir)
 				opts.FlatLayout = flatLayout
 				opts.Resume = !noResume
 
@@ -752,12 +811,169 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 	cmd.Flags().StringVar(&mediaType, "type", "", "Filter by WP media_type: image, file, video, audio, text, application (comma-separated)")
 	cmd.Flags().StringVar(&excludeType, "exclude-type", "", "Exclude media_type(s), e.g. --exclude-type image (downloads all non-image files)")
 	cmd.Flags().StringVar(&excludeExt, "exclude-ext", "", "Exclude file extension(s) or presets, e.g. --exclude-ext jpg,png,webp")
+	cmd.Flags().StringVar(&dirScope, "dir", "", "Scan & download from WooCommerce/EDD/Uploads directories & APIs: wc, woocommerce, edd, uploads, all")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Calculate and display total file count and download size without downloading")
 	cmd.Flags().StringVarP(&search, "search", "s", "", "Search media titles/captions")
 	cmd.Flags().BoolVar(&flatLayout, "flat", false, "Save all files in a single flat folder instead of preserving year/month paths")
 	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Re-download and overwrite existing files")
 	cmd.Flags().IntVar(&maxPages, "max-pages", 0, "Maximum pages of media metadata to fetch (0 = all)")
 	cmd.Flags().IntVar(&maxItems, "max-items", 0, "Maximum number of media items to download (0 = all)")
+
+	return cmd
+}
+
+func newDirsCmd(gf *GlobalFlags) *cobra.Command {
+	var (
+		dirScope    string
+		search      string
+		extFilter   string
+		mimeType    string
+		mediaType   string
+		excludeType string
+		excludeExt  string
+		download    bool
+		dryRun      bool
+		flatLayout  bool
+		noResume    bool
+		maxPages    int
+		maxItems    int
+	)
+
+	cmd := &cobra.Command{
+		Use:     "dirs <site-url...>",
+		Aliases: []string{"wc", "edd", "commerce"},
+		Short:   "Index, search, and download files from WooCommerce (woocommerce_uploads), EDD (edd), and Uploads directories",
+		Example: `  # Index and search WooCommerce & EDD directories + APIs with a Cookie header
+  quarry dirs https://example.com --cookie "wordpress_logged_in_...=..." --search "invoice"
+
+  # Preview total download size of all non-image files in WooCommerce and EDD directories
+  quarry dirs https://example.com --scope wc,edd --exclude-type image --dry-run
+
+  # Download all zip/csv/excel files from WooCommerce, EDD, and Uploads directories
+  quarry dirs https://example.com --scope all --ext zip,csv,excel --download -o ./downloads`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sites, err := collectSiteURLs(args, gf.SitesFile)
+			if err != nil {
+				return err
+			}
+			if len(sites) == 0 {
+				return fmt.Errorf("provide at least one WordPress site URL or --sites-file")
+			}
+
+			// If invoked via alias `quarry wc` or `quarry edd` and --scope wasn't explicitly set, default to that alias
+			calledAs := strings.ToLower(cmd.CalledAs())
+			if !cmd.Flags().Changed("scope") && (calledAs == "wc" || calledAs == "edd") {
+				dirScope = calledAs
+			}
+
+			qf := wp.DefaultQueryFilter("woocommerce")
+			qf.DirectoryScopes = strings.Split(dirScope, ",")
+			qf.Search = search
+			qf.MimeType = mimeType
+			qf.MediaType = mediaType
+			if extFilter != "" {
+				qf.Extensions = strings.Split(extFilter, ",")
+			}
+			if excludeType != "" {
+				qf.ExcludeMediaTypes = strings.Split(excludeType, ",")
+			}
+			if excludeExt != "" {
+				qf.ExcludeExtensions = strings.Split(excludeExt, ",")
+			}
+			qf.MaxPages = maxPages
+			qf.MaxItems = maxItems
+
+			for _, u := range sites {
+				cli, err := wp.NewClient(u, buildClientOptions(*gf))
+				if err != nil {
+					return err
+				}
+				if !gf.Quiet {
+					fmt.Fprintf(os.Stderr, "⛏  [%s] Indexing & searching directories (%s) and e-commerce endpoints...\n",
+						cli.BaseURL(), dirScope)
+				}
+				items, _, err := cli.ScanDirectories(cmd.Context(), qf, nil)
+				if err != nil {
+					return err
+				}
+				if !gf.Quiet {
+					fmt.Fprintf(os.Stderr, "   ✓ Indexed %d matching files/assets across %s\n", len(items), dirScope)
+				}
+
+				if dryRun || download {
+					hostSlug := exporter.SafeSlug(strings.TrimPrefix(strings.TrimPrefix(cli.BaseURL(), "https://"), "http://"), 1)
+					outDir := filepath.Join(gf.OutputDir, hostSlug, "directories")
+					opts := buildPoolOptions(*gf, outDir)
+					opts.FlatLayout = flatLayout
+					opts.Resume = !noResume
+
+					tasks := make([]downloader.AssetTask, 0, len(items))
+					for _, item := range items {
+						if item.SourceURL != "" {
+							tasks = append(tasks, downloader.AssetTask{
+								ID:        item.ID,
+								SourceURL: item.SourceURL,
+								Title:     wp.CleanPlainText(item.Title.Rendered),
+								MimeType:  item.MimeType,
+								KnownSize: item.MediaDetails.FileSize,
+								Date:      item.Date.Time,
+							})
+						}
+					}
+
+					if dryRun {
+						est := downloader.EstimateBatchSize(cmd.Context(), tasks, opts, true, func(done, total int) {
+							if !gf.Quiet {
+								fmt.Fprintf(os.Stderr, "\r   • Probing file sizes via HTTP HEAD [%d/%d]...", done, total)
+							}
+						})
+						if !gf.Quiet && est.TotalFiles > 0 {
+							fmt.Fprintln(os.Stderr)
+						}
+						printSizeEstimate(cli.BaseURL(), est)
+						continue
+					}
+
+					summary, err := downloader.DownloadBatch(cmd.Context(), tasks, opts, func(u downloader.ProgressUpdate) {
+						if !gf.Quiet {
+							mb := float64(u.TotalBytes) / (1024 * 1024)
+							fmt.Fprintf(os.Stderr, "\r   • Downloading [%d/%d] ✓%d ↷%d ✗%d (%.2f MB)...",
+								u.Completed, u.Total, u.Succeeded, u.Skipped, u.Failed, mb)
+						}
+					})
+					if !gf.Quiet {
+						fmt.Fprintln(os.Stderr)
+						fmt.Fprintf(os.Stderr, "✓ Completed %s: %d downloaded, %d skipped, %d failed (%s in %s) → %s\n",
+							cli.BaseURL(), summary.Succeeded, summary.Skipped, summary.Failed,
+							downloader.FormatBytes(summary.TotalBytes), summary.Duration.Round(time.Millisecond), outDir)
+					}
+					if err != nil {
+						return err
+					}
+					continue
+				}
+
+				if err := outputMediaResult(items, exporter.Format(strings.ToLower(gf.Format)), gf.OutputDir, cmd.Flags().Changed("output")); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&dirScope, "scope", "wc,edd", "Directory/plugin scopes to index: wc, woocommerce, edd, uploads, all")
+	cmd.Flags().StringVarP(&search, "search", "s", "", "Search file names, paths, product titles, or SKUs")
+	cmd.Flags().StringVarP(&extFilter, "ext", "e", "", "Filter by extension/preset: zip,csv,excel,xls,xlsx,archive,spreadsheet,pdf,doc,json")
+	cmd.Flags().StringVar(&mimeType, "mime", "", "Filter by MIME type or comma-separated list")
+	cmd.Flags().StringVar(&mediaType, "type", "", "Filter by media_type: image, file, video, audio, text, application")
+	cmd.Flags().StringVar(&excludeType, "exclude-type", "", "Exclude media_type(s), e.g. --exclude-type image")
+	cmd.Flags().StringVar(&excludeExt, "exclude-ext", "", "Exclude file extension(s) or presets, e.g. --exclude-ext jpg,png,webp")
+	cmd.Flags().BoolVarP(&download, "download", "d", false, "Download all matched directory files using the concurrent worker pool")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Calculate and display total file count and download size without downloading")
+	cmd.Flags().BoolVar(&flatLayout, "flat", false, "Save all files in a single flat folder instead of preserving relative paths")
+	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Re-download and overwrite existing files")
+	cmd.Flags().IntVar(&maxPages, "max-pages", 10, "Maximum REST media pages to scan alongside directory crawling (0 = all)")
+	cmd.Flags().IntVar(&maxItems, "max-items", 0, "Maximum number of items to return/download (0 = unlimited)")
 
 	return cmd
 }

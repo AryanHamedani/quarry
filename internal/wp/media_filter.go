@@ -205,12 +205,21 @@ func ExpandMediaFilter(q QueryFilter) (apiMimes []string, matcher func(MediaItem
 
 	hasInclude := len(apiMimes) > 0 || len(allowedExts) > 0
 	hasExclude := len(exclTypes) > 0 || len(exclMimes) > 0 || len(exclExts) > 0
+	var dirScopes []DirectoryScope
+	if len(q.DirectoryScopes) > 0 {
+		dirScopes = NormalizeDirectoryScopes(q.DirectoryScopes)
+	}
 
-	if !hasInclude && !hasExclude {
+	if !hasInclude && !hasExclude && len(dirScopes) == 0 {
 		return nil, nil
 	}
 
 	matcher = func(item MediaItem) bool {
+		if len(dirScopes) > 0 {
+			if !MatchesDirectoryScope(item.SourceURL, item.MediaDetails.File, item.Type+" "+item.AltText, dirScopes) {
+				return false
+			}
+		}
 		itemType := strings.ToLower(strings.TrimSpace(item.MediaType))
 		itemMime := strings.ToLower(strings.TrimSpace(item.MimeType))
 		ext := extractURLFileExt(item.SourceURL)
@@ -256,6 +265,35 @@ func ExpandMediaFilter(q QueryFilter) (apiMimes []string, matcher func(MediaItem
 	}
 
 	return apiMimes, matcher
+}
+
+// MatchesMediaFilter evaluates whether a single MediaItem satisfies the QueryFilter's
+// inclusion, exclusion, and directory scope rules.
+func MatchesMediaFilter(item MediaItem, q QueryFilter) bool {
+	if strings.TrimSpace(q.MediaType) != "" {
+		allowed := false
+		itemMT := strings.ToLower(strings.TrimSpace(item.MediaType))
+		for _, mt := range strings.Split(q.MediaType, ",") {
+			mt = strings.ToLower(strings.TrimSpace(mt))
+			if mt != "" && (itemMT == mt || strings.HasPrefix(strings.ToLower(item.MimeType), mt+"/")) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	_, matcher := ExpandMediaFilter(q)
+	if matcher == nil {
+		return true
+	}
+	return matcher(item)
+}
+
+// ExtractFileExtension extracts the lowercase file extension (without leading dot) from a URL or file path.
+func ExtractFileExtension(rawURL string) string {
+	return strings.TrimPrefix(extractURLFileExt(rawURL), ".")
 }
 
 // ExpandMediaQueryPlan compiles a QueryFilter into:
