@@ -6,12 +6,20 @@ import (
 	"strings"
 )
 
+// AllWPMediaTypes lists the 6 official `media_type` enum values accepted by WordPress `/wp/v2/media`.
+// Note: WordPress categorizes archives (.zip), PDFs, Word docs, and Excel spreadsheets under `file` or `application` or `text`.
+var AllWPMediaTypes = []string{"image", "file", "video", "audio", "text", "application"}
+
 // mimePresets maps friendly extension/category names to the MIME types WordPress uses in `/wp/v2/media?mime_type=...`
 // and the file extensions they correspond to.
 var mimePresets = map[string]struct {
 	mimes []string
 	exts  []string
 }{
+	"image": {
+		mimes: []string{"image/jpeg", "image/png", "image/webp", "image/gif", "image/avif", "image/svg+xml"},
+		exts:  []string{".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".svg", ".bmp", ".ico"},
+	},
 	"zip": {
 		mimes: []string{"application/zip", "application/x-zip-compressed"},
 		exts:  []string{".zip"},
@@ -85,8 +93,8 @@ var mimePresets = map[string]struct {
 // ExpandMediaFilter translates user-supplied `Extensions` (like `zip,csv,excel`) and `MimeType`
 // into:
 //  1. A list of concrete `mime_type` query values for the WordPress REST API.
-//  2. A matcher function to verify a `MediaItem` matches either the requested MIME types or file extensions.
-func ExpandMediaFilter(mimeRaw string, extsRaw []string) (apiMimes []string, matcher func(MediaItem) bool) {
+//  2. A matcher function to verify a `MediaItem` matches the inclusion and exclusion rules.
+func ExpandMediaFilter(q QueryFilter) (apiMimes []string, matcher func(MediaItem) bool) {
 	seenMime := make(map[string]struct{})
 	seenExt := make(map[string]struct{})
 
@@ -115,8 +123,8 @@ func ExpandMediaFilter(mimeRaw string, extsRaw []string) (apiMimes []string, mat
 		}
 	}
 
-	// Parse mimeRaw (can be comma-separated or presets like "zip,csv,excel")
-	for _, token := range strings.Split(mimeRaw, ",") {
+	// Parse MimeType
+	for _, token := range strings.Split(q.MimeType, ",") {
 		tok := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(token, ".")))
 		if tok == "" {
 			continue
@@ -133,8 +141,8 @@ func ExpandMediaFilter(mimeRaw string, extsRaw []string) (apiMimes []string, mat
 		}
 	}
 
-	// Parse extsRaw
-	for _, rawItem := range extsRaw {
+	// Parse Extensions
+	for _, rawItem := range q.Extensions {
 		for _, token := range strings.Split(rawItem, ",") {
 			tok := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(token, ".")))
 			if tok == "" {
@@ -153,20 +161,91 @@ func ExpandMediaFilter(mimeRaw string, extsRaw []string) (apiMimes []string, mat
 		}
 	}
 
-	if len(apiMimes) == 0 && len(allowedExts) == 0 {
+	// Parse Exclusions (ExcludeMediaTypes and ExcludeExtensions)
+	exclTypes := make(map[string]struct{})
+	exclMimes := make(map[string]struct{})
+	exclExts := make(map[string]struct{})
+
+	for _, raw := range q.ExcludeMediaTypes {
+		for _, token := range strings.Split(raw, ",") {
+			tok := strings.ToLower(strings.TrimSpace(token))
+			if tok == "" {
+				continue
+			}
+			exclTypes[tok] = struct{}{}
+			if preset, ok := mimePresets[tok]; ok {
+				for _, m := range preset.mimes {
+					exclMimes[m] = struct{}{}
+				}
+				for _, e := range preset.exts {
+					exclExts[e] = struct{}{}
+				}
+			}
+		}
+	}
+
+	for _, raw := range q.ExcludeExtensions {
+		for _, token := range strings.Split(raw, ",") {
+			tok := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(token, ".")))
+			if tok == "" {
+				continue
+			}
+			if preset, ok := mimePresets[tok]; ok {
+				for _, m := range preset.mimes {
+					exclMimes[m] = struct{}{}
+				}
+				for _, e := range preset.exts {
+					exclExts[e] = struct{}{}
+				}
+			} else {
+				exclExts["."+tok] = struct{}{}
+			}
+		}
+	}
+
+	hasInclude := len(apiMimes) > 0 || len(allowedExts) > 0
+	hasExclude := len(exclTypes) > 0 || len(exclMimes) > 0 || len(exclExts) > 0
+
+	if !hasInclude && !hasExclude {
 		return nil, nil
 	}
 
 	matcher = func(item MediaItem) bool {
+		itemType := strings.ToLower(strings.TrimSpace(item.MediaType))
 		itemMime := strings.ToLower(strings.TrimSpace(item.MimeType))
+		ext := extractURLFileExt(item.SourceURL)
+		if ext == "" && item.MediaDetails.File != "" {
+			ext = strings.ToLower(path.Ext(item.MediaDetails.File))
+		}
+
+		// 1. Check Exclusions first
+		if hasExclude {
+			if _, blocked := exclTypes[itemType]; blocked {
+				return false
+			}
+			for t := range exclTypes {
+				if strings.HasPrefix(itemMime, t+"/") {
+					return false
+				}
+			}
+			if _, blocked := exclMimes[itemMime]; blocked {
+				return false
+			}
+			if ext != "" {
+				if _, blocked := exclExts[ext]; blocked {
+					return false
+				}
+			}
+		}
+
+		// 2. Check Inclusions if any were specified
+		if !hasInclude {
+			return true
+		}
 		for m := range seenMime {
 			if itemMime == m || strings.HasPrefix(itemMime, m+"/") {
 				return true
 			}
-		}
-		ext := extractURLFileExt(item.SourceURL)
-		if ext == "" && item.MediaDetails.File != "" {
-			ext = strings.ToLower(path.Ext(item.MediaDetails.File))
 		}
 		if ext != "" {
 			if _, ok := seenExt[ext]; ok {
@@ -177,6 +256,39 @@ func ExpandMediaFilter(mimeRaw string, extsRaw []string) (apiMimes []string, mat
 	}
 
 	return apiMimes, matcher
+}
+
+// ResolveRemainingMediaTypes returns the subset of AllWPMediaTypes not excluded by excludeTypes,
+// allowing Quarry to query non-excluded `media_type` endpoints directly on WordPress without scanning excluded types (e.g. skipping 10,000 images).
+func ResolveRemainingMediaTypes(includeMediaType string, excludeTypes []string) []string {
+	if strings.TrimSpace(includeMediaType) != "" {
+		var out []string
+		for _, t := range strings.Split(includeMediaType, ",") {
+			if s := strings.ToLower(strings.TrimSpace(t)); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if len(excludeTypes) == 0 {
+		return nil
+	}
+	excluded := make(map[string]bool)
+	for _, raw := range excludeTypes {
+		for _, tok := range strings.Split(raw, ",") {
+			tok = strings.ToLower(strings.TrimSpace(tok))
+			if tok != "" {
+				excluded[tok] = true
+			}
+		}
+	}
+	var remaining []string
+	for _, mt := range AllWPMediaTypes {
+		if !excluded[mt] {
+			remaining = append(remaining, mt)
+		}
+	}
+	return remaining
 }
 
 func extractURLFileExt(rawURL string) string {

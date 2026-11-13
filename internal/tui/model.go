@@ -106,6 +106,11 @@ type downloadFinishedMsg struct {
 	err     error
 }
 
+type sizeEstimatedMsg struct {
+	estimate downloader.SizeEstimate
+	err      error
+}
+
 // Model is the root Bubble Tea state machine for Quarry's interactive TUI.
 type Model struct {
 	ctx        context.Context
@@ -310,7 +315,40 @@ func (m *Model) downloadMediaCmd() tea.Cmd {
 	mediaDir := filepath.Join(m.outputDir, siteHost, "media")
 	ctx := m.ctx
 	conc := m.concurrent
+	tasks := m.collectMediaTasksForSelection()
 
+	return func() tea.Msg {
+		if len(tasks) == 0 {
+			return downloadFinishedMsg{err: fmt.Errorf("no downloadable media URLs found in current selection")}
+		}
+		opts := downloader.DefaultPoolOptions(mediaDir)
+		opts.Concurrency = conc
+		summary, err := downloader.DownloadBatch(ctx, tasks, opts, nil)
+		return downloadFinishedMsg{
+			summary: summary,
+			outDir:  mediaDir,
+			err:     err,
+		}
+	}
+}
+
+func (m *Model) estimateMediaSizeCmd() tea.Cmd {
+	ctx := m.ctx
+	conc := m.concurrent
+	tasks := m.collectMediaTasksForSelection()
+
+	return func() tea.Msg {
+		if len(tasks) == 0 {
+			return sizeEstimatedMsg{err: fmt.Errorf("no media URLs found in current selection")}
+		}
+		opts := downloader.DefaultPoolOptions(m.outputDir)
+		opts.Concurrency = conc
+		est := downloader.EstimateBatchSize(ctx, tasks, opts, true, nil)
+		return sizeEstimatedMsg{estimate: est}
+	}
+}
+
+func (m *Model) collectMediaTasksForSelection() []downloader.AssetTask {
 	var tasks []downloader.AssetTask
 	switch m.activeTab {
 	case TabMedia:
@@ -322,6 +360,7 @@ func (m *Model) downloadMediaCmd() tea.Cmd {
 					SourceURL: item.SourceURL,
 					Title:     wp.CleanPlainText(item.Title.Rendered),
 					MimeType:  item.MimeType,
+					KnownSize: item.MediaDetails.FileSize,
 					Date:      item.Date.Time,
 				})
 			}
@@ -345,20 +384,7 @@ func (m *Model) downloadMediaCmd() tea.Cmd {
 			}
 		}
 	}
-
-	return func() tea.Msg {
-		if len(tasks) == 0 {
-			return downloadFinishedMsg{err: fmt.Errorf("no downloadable media URLs found in current selection")}
-		}
-		opts := downloader.DefaultPoolOptions(mediaDir)
-		opts.Concurrency = conc
-		summary, err := downloader.DownloadBatch(ctx, tasks, opts, nil)
-		return downloadFinishedMsg{
-			summary: summary,
-			outDir:  mediaDir,
-			err:     err,
-		}
-	}
+	return tasks
 }
 
 func (m *Model) selectedOrCurrentPosts() []wp.Post {
@@ -472,6 +498,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			mb := float64(msg.summary.TotalBytes) / (1024 * 1024)
 			m.statusMsg = fmt.Sprintf("✓ Downloaded %d files (%d skipped, %d failed, %.2f MB) → %s",
 				msg.summary.Succeeded, msg.summary.Skipped, msg.summary.Failed, mb, msg.outDir)
+		}
+		return m, nil
+
+	case sizeEstimatedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.isError = true
+			m.statusMsg = fmt.Sprintf("Size estimate error: %v", msg.err)
+		} else {
+			m.isError = false
+			est := msg.estimate
+			m.statusMsg = fmt.Sprintf("Σ Download Estimate: %s across %d files (%d known, %d unknown size)",
+				downloader.FormatBytes(est.TotalBytes), est.TotalFiles, est.KnownSizeFiles, est.UnknownFiles)
 		}
 		return m, nil
 
@@ -650,6 +689,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.loadingLabel = "Downloading media assets in background worker pool..."
 			return m, tea.Batch(m.spin.Tick, m.downloadMediaCmd())
+		case "D":
+			m.loading = true
+			m.loadingLabel = "Calculating total download size (checking metadata & HTTP HEAD)..."
+			return m, tea.Batch(m.spin.Tick, m.estimateMediaSizeCmd())
 		}
 
 		// Navigation inside focused pane
@@ -846,8 +889,16 @@ func (m *Model) applyFilterDSL(input string) {
 			m.query.MimeType = v
 		case "ext", "exts", "extension", "preset":
 			m.query.Extensions = strings.Split(v, ",")
+		case "exclude-type", "not-type", "!type":
+			m.query.ExcludeMediaTypes = strings.Split(v, ",")
+		case "exclude-ext", "not-ext", "!ext":
+			m.query.ExcludeExtensions = strings.Split(v, ",")
 		case "type":
-			m.query.MediaType = v
+			if strings.HasPrefix(v, "!") || strings.HasPrefix(v, "-") {
+				m.query.ExcludeMediaTypes = strings.Split(strings.TrimLeft(v, "!-"), ",")
+			} else {
+				m.query.MediaType = v
+			}
 		case "orderby":
 			m.query.OrderBy = v
 		case "order":

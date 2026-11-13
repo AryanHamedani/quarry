@@ -23,6 +23,7 @@ type AssetTask struct {
 	SourceURL string
 	Title     string
 	MimeType  string
+	KnownSize int64 // filesize reported by WordPress REST API media_details.filesize (0 if unknown)
 	Date      time.Time
 }
 
@@ -310,4 +311,147 @@ func downloadOne(ctx context.Context, client *http.Client, task AssetTask, opts 
 	res.Bytes = written
 	res.SHA256 = hex.EncodeToString(hasher.Sum(nil))
 	return res
+}
+
+// SizeEstimate summarizes pre-download size calculation across a batch of AssetTasks.
+type SizeEstimate struct {
+	TotalFiles      int              `json:"total_files"`
+	KnownSizeFiles  int              `json:"known_size_files"`
+	UnknownFiles    int              `json:"unknown_size_files"`
+	TotalBytes      int64            `json:"total_bytes"`
+	ByTypeBytes     map[string]int64 `json:"by_type_bytes"`
+	ByTypeCounts    map[string]int   `json:"by_type_counts"`
+}
+
+// EstimateBatchSize calculates the total download size of tasks.
+// It uses `KnownSize` from WordPress `media_details.filesize` first, and if `probeHEAD` is true,
+// performs concurrent HTTP HEAD requests to fetch `Content-Length` for any items missing size metadata.
+func EstimateBatchSize(ctx context.Context, tasks []AssetTask, opts PoolOptions, probeHEAD bool, onProgress func(done, total int)) SizeEstimate {
+	// Deduplicate tasks by SourceURL
+	unique := make([]AssetTask, 0, len(tasks))
+	seen := make(map[string]struct{}, len(tasks))
+	for _, t := range tasks {
+		u := strings.TrimSpace(t.SourceURL)
+		if u == "" {
+			continue
+		}
+		if _, ok := seen[u]; ok {
+			continue
+		}
+		seen[u] = struct{}{}
+		unique = append(unique, t)
+	}
+
+	est := SizeEstimate{
+		TotalFiles:   len(unique),
+		ByTypeBytes:  make(map[string]int64),
+		ByTypeCounts: make(map[string]int),
+	}
+	if len(unique) == 0 {
+		return est
+	}
+
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = 8
+	}
+	if opts.Timeout <= 0 {
+		opts.Timeout = 20 * time.Second
+	}
+	if opts.UserAgent == "" {
+		opts.UserAgent = DefaultPoolOptions(opts.OutputDir).UserAgent
+	}
+
+	client := &http.Client{
+		Timeout: opts.Timeout,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: opts.Concurrency * 2,
+			IdleConnTimeout:     60 * time.Second,
+		},
+	}
+
+	type idxTask struct {
+		idx  int
+		task AssetTask
+	}
+	var needProbe []idxTask
+	sizes := make([]int64, len(unique))
+	for i, t := range unique {
+		if t.KnownSize > 0 {
+			sizes[i] = t.KnownSize
+		} else if probeHEAD {
+			needProbe = append(needProbe, idxTask{idx: i, task: t})
+		}
+	}
+
+	if len(needProbe) > 0 {
+		ch := make(chan idxTask, len(needProbe))
+		for _, it := range needProbe {
+			ch <- it
+		}
+		close(ch)
+
+		var doneCount int32
+		var wg sync.WaitGroup
+		workers := min(opts.Concurrency*2, len(needProbe))
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for item := range ch {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					req, err := http.NewRequestWithContext(ctx, http.MethodHead, item.task.SourceURL, nil)
+					if err == nil {
+						req.Header.Set("User-Agent", opts.UserAgent)
+						if resp, err := client.Do(req); err == nil {
+							_ = resp.Body.Close()
+							if resp.ContentLength > 0 {
+								sizes[item.idx] = resp.ContentLength
+							}
+						}
+					}
+					d := int(atomic.AddInt32(&doneCount, 1))
+					if onProgress != nil {
+						onProgress(d, len(needProbe))
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	for i, t := range unique {
+		sz := sizes[i]
+		group := t.MimeType
+		if group == "" {
+			group = "unknown"
+		}
+		est.ByTypeCounts[group]++
+		if sz > 0 {
+			est.KnownSizeFiles++
+			est.TotalBytes += sz
+			est.ByTypeBytes[group] += sz
+		} else {
+			est.UnknownFiles++
+		}
+	}
+	return est
+}
+
+// FormatBytes renders a byte count in human-readable units (KB, MB, GB).
+func FormatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }

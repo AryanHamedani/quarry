@@ -163,7 +163,8 @@ func TestClientDiscoverAndPagination(t *testing.T) {
 }
 
 func TestExpandMediaFilterZipCSVExcel(t *testing.T) {
-	mimes, matcher := ExpandMediaFilter("", []string{"zip", "csv", "excel"})
+	q := QueryFilter{Extensions: []string{"zip", "csv", "excel"}}
+	mimes, matcher := ExpandMediaFilter(q)
 	if len(mimes) < 5 {
 		t.Fatalf("expected expanded MIME types for zip,csv,excel, got %v", mimes)
 	}
@@ -186,5 +187,32 @@ func TestExpandMediaFilterZipCSVExcel(t *testing.T) {
 		if got := matcher(tc.item); got != tc.want {
 			t.Errorf("matcher(%+v) = %v, want %v", tc.item, got, tc.want)
 		}
+	}
+}
+
+func TestExcludeMediaTypesAndRemainingTypes(t *testing.T) {
+	rem := ResolveRemainingMediaTypes("", []string{"image"})
+	if len(rem) != 5 {
+		t.Fatalf("expected 5 non-image media_type values, got %v", rem)
+	}
+	for _, r := range rem {
+		if r == "image" {
+			t.Errorf("did not expect 'image' in remaining types: %v", rem)
+		}
+	}
+
+	q := QueryFilter{ExcludeMediaTypes: []string{"image"}, ExcludeExtensions: []string{"mp4"}}
+	_, matcher := ExpandMediaFilter(q)
+	if matcher == nil {
+		t.Fatal("expected non-nil exclusion matcher")
+	}
+	if matcher(MediaItem{ID: 1, MediaType: "image", MimeType: "image/png", SourceURL: "https://example.com/a.png"}) {
+		t.Error("expected image/png to be excluded")
+	}
+	if matcher(MediaItem{ID: 2, MediaType: "video", MimeType: "video/mp4", SourceURL: "https://example.com/v.mp4"}) {
+		t.Error("expected .mp4 to be excluded")
+	}
+	if !matcher(MediaItem{ID: 3, MediaType: "file", MimeType: "application/pdf", SourceURL: "https://example.com/doc.pdf"}) {
+		t.Error("expected application/pdf to be included")
 	}
 }

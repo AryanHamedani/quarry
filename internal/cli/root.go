@@ -260,10 +260,13 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 		authorID   int
 		categoryID int
 		tagID      int
-		slug       string
-		mimeType   string
-		extFilter  string
-		perPage    int
+		slug        string
+		mimeType    string
+		extFilter   string
+		mediaType   string
+		excludeType string
+		excludeExt  string
+		perPage     int
 		maxPages   int
 		maxItems   int
 		allPages   bool
@@ -296,8 +299,15 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 			qf.Before = before
 			qf.Slug = slug
 			qf.MimeType = mimeType
+			qf.MediaType = mediaType
 			if extFilter != "" {
 				qf.Extensions = strings.Split(extFilter, ",")
+			}
+			if excludeType != "" {
+				qf.ExcludeMediaTypes = strings.Split(excludeType, ",")
+			}
+			if excludeExt != "" {
+				qf.ExcludeExtensions = strings.Split(excludeExt, ",")
 			}
 			if authorID > 0 {
 				qf.Author = []int{authorID}
@@ -427,6 +437,9 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 	f.StringVar(&slug, "slug", "", "Filter by exact item slug")
 	f.StringVar(&mimeType, "mime", "", "Filter media by MIME type or comma-separated list (e.g. application/zip,text/csv)")
 	f.StringVarP(&extFilter, "ext", "e", "", "Filter media by extension/preset: zip,csv,excel,xls,xlsx,archive,spreadsheet,pdf,doc,json")
+	f.StringVar(&mediaType, "type", "", "Filter media by WP media_type: image, file, video, audio, text, application (comma-separated)")
+	f.StringVar(&excludeType, "exclude-type", "", "Exclude media_type(s), e.g. --exclude-type image (or image,video)")
+	f.StringVar(&excludeExt, "exclude-ext", "", "Exclude file extension(s) or presets, e.g. --exclude-ext jpg,png,webp")
 	f.IntVar(&perPage, "per-page", 25, "Items per page (1..100)")
 	f.BoolVar(&allPages, "all", false, "Automatically paginate through all available pages")
 	f.IntVar(&maxPages, "max-pages", 0, "Maximum number of pages to fetch when --all is set (0 = unlimited)")
@@ -602,22 +615,26 @@ func newExportCmd(gf *GlobalFlags) *cobra.Command {
 
 func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 	var (
-		mimeType   string
-		extFilter  string
-		mediaType  string
-		search     string
-		flatLayout bool
-		noResume   bool
-		maxPages   int
-		maxItems   int
+		mimeType    string
+		extFilter   string
+		mediaType   string
+		excludeType string
+		excludeExt  string
+		dryRun      bool
+		search      string
+		flatLayout  bool
+		noResume    bool
+		maxPages    int
+		maxItems    int
 	)
 
 	cmd := &cobra.Command{
 		Use:   "media <site-url...>",
 		Short: "Bulk-download media attachments (images, archives, spreadsheets, videos, documents) via concurrent worker pool",
-		Example: `  quarry media https://example.com --ext zip,csv,excel --output ./downloads
-  quarry media https://example.com --concurrency 8 --output ./downloads
-  quarry media https://example.com --mime image/webp --max-items 100`,
+		Example: `  quarry media https://example.com --exclude-type image --dry-run
+  quarry media https://example.com --exclude-type image --output ./downloads
+  quarry media https://example.com --ext zip,csv,excel --output ./downloads
+  quarry media https://example.com --type image --concurrency 12 --output ./media-dump`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sites, err := collectSiteURLs(args, gf.SitesFile)
 			if err != nil {
@@ -640,6 +657,12 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 				qf.MimeType = mimeType
 				if extFilter != "" {
 					qf.Extensions = strings.Split(extFilter, ",")
+				}
+				if excludeType != "" {
+					qf.ExcludeMediaTypes = strings.Split(excludeType, ",")
+				}
+				if excludeExt != "" {
+					qf.ExcludeExtensions = strings.Split(excludeExt, ",")
 				}
 				qf.MediaType = mediaType
 				qf.Search = search
@@ -667,6 +690,7 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 							SourceURL: item.SourceURL,
 							Title:     wp.CleanPlainText(item.Title.Rendered),
 							MimeType:  item.MimeType,
+							KnownSize: item.MediaDetails.FileSize,
 							Date:      item.Date.Time,
 						})
 					}
@@ -677,6 +701,31 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 				opts.FlatLayout = flatLayout
 				opts.Resume = !noResume
 
+				if dryRun {
+					est := downloader.EstimateBatchSize(cmd.Context(), tasks, opts, true, func(done, total int) {
+						if !gf.Quiet {
+							fmt.Fprintf(os.Stderr, "\r   • Probing file sizes via HTTP HEAD [%d/%d]...", done, total)
+						}
+					})
+					if !gf.Quiet && est.TotalFiles > 0 {
+						fmt.Fprintln(os.Stderr)
+					}
+					printSizeEstimate(cli.BaseURL(), est)
+					continue
+				}
+
+				// Show pre-download size summary from known WP metadata before starting download
+				preEst := downloader.EstimateBatchSize(cmd.Context(), tasks, opts, false, nil)
+				if !gf.Quiet && preEst.TotalFiles > 0 {
+					if preEst.UnknownFiles == 0 {
+						fmt.Fprintf(os.Stderr, "   • Total download size: %s across %d files\n",
+							downloader.FormatBytes(preEst.TotalBytes), preEst.TotalFiles)
+					} else if preEst.KnownSizeFiles > 0 {
+						fmt.Fprintf(os.Stderr, "   • Estimated size: %s+ (%d/%d files report size in API; run with --dry-run to probe all via HEAD)\n",
+							downloader.FormatBytes(preEst.TotalBytes), preEst.KnownSizeFiles, preEst.TotalFiles)
+					}
+				}
+
 				summary, err := downloader.DownloadBatch(cmd.Context(), tasks, opts, func(u downloader.ProgressUpdate) {
 					if !gf.Quiet {
 						mb := float64(u.TotalBytes) / (1024 * 1024)
@@ -686,9 +735,9 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 				})
 				if !gf.Quiet {
 					fmt.Fprintln(os.Stderr)
-					fmt.Fprintf(os.Stderr, "✓ Completed %s: %d downloaded, %d skipped, %d failed (%.2f MB in %s) → %s\n",
+					fmt.Fprintf(os.Stderr, "✓ Completed %s: %d downloaded, %d skipped, %d failed (%s in %s) → %s\n",
 						cli.BaseURL(), summary.Succeeded, summary.Skipped, summary.Failed,
-						float64(summary.TotalBytes)/(1024*1024), summary.Duration.Round(time.Millisecond), mediaDir)
+						downloader.FormatBytes(summary.TotalBytes), summary.Duration.Round(time.Millisecond), mediaDir)
 				}
 				if err != nil {
 					return err
@@ -700,7 +749,10 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 
 	cmd.Flags().StringVar(&mimeType, "mime", "", "Filter by MIME type or comma-separated list (e.g. application/zip,text/csv)")
 	cmd.Flags().StringVarP(&extFilter, "ext", "e", "", "Filter by extension/preset: zip,csv,excel,xls,xlsx,archive,spreadsheet,pdf,doc,json")
-	cmd.Flags().StringVar(&mediaType, "type", "", "Filter by general media type (image, video, audio, application, text)")
+	cmd.Flags().StringVar(&mediaType, "type", "", "Filter by WP media_type: image, file, video, audio, text, application (comma-separated)")
+	cmd.Flags().StringVar(&excludeType, "exclude-type", "", "Exclude media_type(s), e.g. --exclude-type image (downloads all non-image files)")
+	cmd.Flags().StringVar(&excludeExt, "exclude-ext", "", "Exclude file extension(s) or presets, e.g. --exclude-ext jpg,png,webp")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Calculate and display total file count and download size without downloading")
 	cmd.Flags().StringVarP(&search, "search", "s", "", "Search media titles/captions")
 	cmd.Flags().BoolVar(&flatLayout, "flat", false, "Save all files in a single flat folder instead of preserving year/month paths")
 	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Re-download and overwrite existing files")
@@ -708,6 +760,22 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 	cmd.Flags().IntVar(&maxItems, "max-items", 0, "Maximum number of media items to download (0 = all)")
 
 	return cmd
+}
+
+func printSizeEstimate(siteURL string, est downloader.SizeEstimate) {
+	fmt.Printf("━━━ Media Download Size Estimate: %s ━━━\n", siteURL)
+	fmt.Printf("  Total Matching Files : %d\n", est.TotalFiles)
+	fmt.Printf("  Total Download Size  : %s (%d bytes)\n", downloader.FormatBytes(est.TotalBytes), est.TotalBytes)
+	if est.UnknownFiles > 0 {
+		fmt.Printf("  Size Coverage        : %d known, %d unknown (server omitted Content-Length)\n", est.KnownSizeFiles, est.UnknownFiles)
+	}
+	if len(est.ByTypeCounts) > 0 {
+		fmt.Println("  Breakdown by MIME    :")
+		for mime, cnt := range est.ByTypeCounts {
+			fmt.Printf("    • %-45s %4d files  (%s)\n", mime, cnt, downloader.FormatBytes(est.ByTypeBytes[mime]))
+		}
+	}
+	fmt.Println()
 }
 
 func outputPostsResult(posts []wp.Post, format exporter.Format, outPath string, writeToFile bool, siteURL string) error {

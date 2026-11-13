@@ -306,11 +306,13 @@ type QueryFilter struct {
 	PerPage    int    // 1..100, default 25 in interactive, 100 in batch
 	Page       int    // 1-indexed
 	Offset     int
-	Sticky     *bool
-	MimeType   string   // for media: image, video, audio, application/pdf, or comma-separated list/presets
-	MediaType  string   // image, video, text, application, audio
-	Extensions []string // file extension or preset filter (e.g., zip, csv, xls, xlsx, excel, archive)
-	Parent     *int
+	Sticky            *bool
+	MimeType          string   // for media: image, video, audio, application/pdf, or comma-separated list/presets
+	MediaType         string   // image, file, video, audio, text, application (can be comma-separated)
+	Extensions        []string // file extension or preset filter (e.g., zip, csv, xls, xlsx, excel, archive)
+	ExcludeMediaTypes []string // media_type or MIME prefix to exclude (e.g., image, video, audio)
+	ExcludeExtensions []string // file extensions or presets to exclude (e.g., jpg, png, webp, zip)
+	Parent            *int
 	Slug       string
 	Fields     []string // _fields projection
 	Embed      bool     // _embed=1

@@ -141,6 +141,12 @@ quarry export https://wordpress.org/news \
 ### 5. Bulk-Download Media Library Assets
 
 ```bash
+# Preview the exact file count and total download size before downloading (--dry-run)
+quarry media https://example.com --exclude-type image --dry-run
+
+# Download ALL files except images (documents, archives, spreadsheets, audio, video)
+quarry media https://example.com --exclude-type image --output ./media-dump
+
 # Download all ZIP, CSV, and Excel files across the site
 quarry media https://example.com --ext zip,csv,excel --output ./media-dump
 

@@ -112,6 +112,12 @@ func (m *Model) renderTabsAndControls() string {
 	if len(m.query.Extensions) > 0 {
 		filterParts = append(filterParts, "ext:"+strings.Join(m.query.Extensions, ","))
 	}
+	if len(m.query.ExcludeMediaTypes) > 0 {
+		filterParts = append(filterParts, "exclude-type:"+strings.Join(m.query.ExcludeMediaTypes, ","))
+	}
+	if len(m.query.ExcludeExtensions) > 0 {
+		filterParts = append(filterParts, "exclude-ext:"+strings.Join(m.query.ExcludeExtensions, ","))
+	}
 	if len(m.selected) > 0 {
 		filterParts = append(filterParts, fmt.Sprintf("selected:%d", len(m.selected)))
 	}
@@ -440,6 +446,7 @@ func (m *Model) renderFooter() string {
 		{"n/p", "page"},
 		{"space/a", "select"},
 		{"x/J/C", "export MD/JSON/CSV"},
+		{"D", "estimate size"},
 		{"d", "download media"},
 		{"v", "view"},
 		{"?", "help"},
@@ -481,6 +488,7 @@ SELECTION, EXTRACTION & MEDIA DOWNLOAD
   x             Export selected (or current) items to Markdown with YAML frontmatter
   J             Export selected (or current) items to formatted JSON
   C             Export selected (or current) items to CSV
+  D             Estimate total download size before downloading (via WP metadata + HTTP HEAD)
   d             Download media files (featured + embedded images/files) via worker pool
   v             Cycle Inspector rendering mode (Markdown → Raw HTML → REST JSON)
 

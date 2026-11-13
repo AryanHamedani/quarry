@@ -568,16 +568,23 @@ func (c *Client) FetchPosts(ctx context.Context, q QueryFilter) ([]Post, PageMet
 }
 
 // FetchMedia queries `/wp/v2/media` for a single page.
-// If multiple MIME types or extension presets (e.g. zip,csv,excel) are specified, it queries and merges them cleanly.
+// If multiple MIME types, extension presets (e.g. zip,csv,excel), or excluded media types (e.g. --exclude-type image)
+// are specified, it queries and merges them cleanly.
 func (c *Client) FetchMedia(ctx context.Context, q QueryFilter) ([]MediaItem, PageMeta, error) {
 	q.Endpoint = "media"
 	q.Embed = false
 
-	apiMimes, matcher := ExpandMediaFilter(q.MimeType, q.Extensions)
-	if len(apiMimes) <= 1 {
+	apiMimes, matcher := ExpandMediaFilter(q)
+	mediaTypes := ResolveRemainingMediaTypes(q.MediaType, q.ExcludeMediaTypes)
+
+	// Fast single-request path when at most 1 MIME type and at most 1 media_type are needed
+	if len(apiMimes) <= 1 && len(mediaTypes) <= 1 {
 		qCopy := q
 		if len(apiMimes) == 1 {
 			qCopy.MimeType = apiMimes[0]
+		}
+		if len(mediaTypes) == 1 {
+			qCopy.MediaType = mediaTypes[0]
 		}
 		var items []MediaItem
 		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(qCopy), &items)
@@ -600,17 +607,38 @@ func (c *Client) FetchMedia(ctx context.Context, q QueryFilter) ([]MediaItem, Pa
 		return items, meta, nil
 	}
 
-	// Multiple MIME types requested (e.g. zip + csv + excel): query each and deduplicate by ID
+	// Multi-query fan-out: either across multiple MIME types OR across non-excluded media_type values
 	seen := make(map[int]struct{})
 	var merged []MediaItem
 	var aggMeta PageMeta
 	aggMeta.Page = max(1, q.Page)
 	aggMeta.PerPage = max(25, q.PerPage)
 
-	for _, mime := range apiMimes {
-		qSub := q
-		qSub.MimeType = mime
-		qSub.Extensions = nil
+	var subQueries []QueryFilter
+	if len(apiMimes) > 1 {
+		for _, mime := range apiMimes {
+			qSub := q
+			qSub.MimeType = mime
+			qSub.Extensions = nil
+			if len(mediaTypes) == 1 {
+				qSub.MediaType = mediaTypes[0]
+			} else {
+				qSub.MediaType = ""
+			}
+			subQueries = append(subQueries, qSub)
+		}
+	} else {
+		for _, mt := range mediaTypes {
+			qSub := q
+			qSub.MediaType = mt
+			if len(apiMimes) == 1 {
+				qSub.MimeType = apiMimes[0]
+			}
+			subQueries = append(subQueries, qSub)
+		}
+	}
+
+	for _, qSub := range subQueries {
 		var subItems []MediaItem
 		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(qSub), &subItems)
 		aggMeta.Latency += meta.Latency
@@ -618,7 +646,7 @@ func (c *Client) FetchMedia(ctx context.Context, q QueryFilter) ([]MediaItem, Pa
 			aggMeta.RequestURL = meta.RequestURL
 		}
 		if err != nil {
-			// Some WordPress setups reject unrecognized mime_type subtypes with 400; skip and continue
+			// Some WordPress setups reject unrecognized mime_type/media_type values with 400; skip and continue
 			continue
 		}
 		aggMeta.TotalItems += meta.TotalItems
