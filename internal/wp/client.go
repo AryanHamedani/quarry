@@ -357,7 +357,7 @@ func (c *Client) enrichProfile(ctx context.Context, profile *SiteProfile) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		var types map[string]PostType
+		var types FlexMap[PostType]
 		if _, err := c.GetJSON(ctx, "/wp/v2/types", nil, &types); err == nil && len(types) > 0 {
 			mu.Lock()
 			profile.PostTypes = types
@@ -369,7 +369,7 @@ func (c *Client) enrichProfile(ctx context.Context, profile *SiteProfile) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		var taxes map[string]Taxonomy
+		var taxes FlexMap[Taxonomy]
 		if _, err := c.GetJSON(ctx, "/wp/v2/taxonomies", nil, &taxes); err == nil && len(taxes) > 0 {
 			mu.Lock()
 			profile.Taxonomies = taxes
@@ -558,7 +558,7 @@ func (c *Client) FetchPosts(ctx context.Context, q QueryFilter) ([]Post, PageMet
 		endpoint = "posts"
 	}
 	route := "/wp/v2/" + strings.TrimLeft(endpoint, "/")
-	var items []Post
+	var items FlexSlice[Post]
 	meta, err := c.GetJSON(ctx, route, BuildQueryValues(q), &items)
 	if meta.TotalPages == 0 && len(items) > 0 {
 		meta.TotalPages = 1
@@ -572,11 +572,12 @@ func (c *Client) FetchMedia(ctx context.Context, q QueryFilter) ([]MediaItem, Pa
 	subQueries, matcher := ExpandMediaQueryPlan(q)
 
 	if len(subQueries) == 1 {
-		var items []MediaItem
-		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(subQueries[0]), &items)
+		var rawItems FlexSlice[MediaItem]
+		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(subQueries[0]), &rawItems)
 		if err != nil {
 			return nil, meta, err
 		}
+		items := []MediaItem(rawItems)
 		if matcher != nil {
 			filtered := make([]MediaItem, 0, len(items))
 			for _, it := range items {
@@ -600,7 +601,7 @@ func (c *Client) FetchMedia(ctx context.Context, q QueryFilter) ([]MediaItem, Pa
 	aggMeta.PerPage = max(25, q.PerPage)
 
 	for _, qSub := range subQueries {
-		var subItems []MediaItem
+		var subItems FlexSlice[MediaItem]
 		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(qSub), &subItems)
 		aggMeta.Latency += meta.Latency
 		if aggMeta.RequestURL == "" {
@@ -636,7 +637,7 @@ func (c *Client) FetchTerms(ctx context.Context, q QueryFilter) ([]TermItem, Pag
 		endpoint = "categories"
 	}
 	q.Embed = false
-	var items []TermItem
+	var items FlexSlice[TermItem]
 	meta, err := c.GetJSON(ctx, "/wp/v2/"+strings.TrimLeft(endpoint, "/"), BuildQueryValues(q), &items)
 	if meta.TotalPages == 0 && len(items) > 0 {
 		meta.TotalPages = 1
@@ -649,7 +650,7 @@ func (c *Client) FetchTerms(ctx context.Context, q QueryFilter) ([]TermItem, Pag
 func (c *Client) FetchUsers(ctx context.Context, q QueryFilter) ([]User, PageMeta, error) {
 	q.Endpoint = "users"
 	q.Embed = false
-	var items []User
+	var items FlexSlice[User]
 	meta, err := c.GetJSON(ctx, "/wp/v2/users", BuildQueryValues(q), &items)
 	if meta.TotalPages == 0 && len(items) > 0 {
 		meta.TotalPages = 1
@@ -662,7 +663,7 @@ func (c *Client) FetchUsers(ctx context.Context, q QueryFilter) ([]User, PageMet
 func (c *Client) FetchComments(ctx context.Context, q QueryFilter) ([]Comment, PageMeta, error) {
 	q.Endpoint = "comments"
 	q.Embed = false
-	var items []Comment
+	var items FlexSlice[Comment]
 	meta, err := c.GetJSON(ctx, "/wp/v2/comments", BuildQueryValues(q), &items)
 	if meta.TotalPages == 0 && len(items) > 0 {
 		meta.TotalPages = 1
@@ -746,7 +747,7 @@ func (c *Client) FetchAllMedia(ctx context.Context, q QueryFilter, onProgress Pr
 	// Phase 1: Fetch page 1 of each sub-query stream to discover its exact pagination bounds
 	for i, sub := range subQueries {
 		sub.Page = 1
-		var items []MediaItem
+		var items FlexSlice[MediaItem]
 		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(sub), &items)
 		if err != nil {
 			if len(subQueries) == 1 {
@@ -797,7 +798,7 @@ func (c *Client) FetchAllMedia(ctx context.Context, q QueryFilter, onProgress Pr
 	for _, st := range multiPageStreams {
 		for page := 2; page <= st.totalPages; page++ {
 			st.sub.Page = page
-			var items []MediaItem
+			var items FlexSlice[MediaItem]
 			_, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(st.sub), &items)
 			if err != nil {
 				if strings.Contains(err.Error(), "rest_post_invalid_page_number") {

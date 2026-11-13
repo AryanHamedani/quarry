@@ -297,3 +297,65 @@ func TestFetchAllMediaIndependentStreamPagination(t *testing.T) {
 		t.Errorf("expected 0 out-of-bounds page requests across sub-streams, got %d", invalidPageRequests)
 	}
 }
+
+func TestPHPPolymorphicJSONResilience(t *testing.T) {
+	// Simulates real-world WordPress PHP quirks:
+	// - media_details.sizes.<size>.mime_type is `false` (boolean) instead of string
+	// - media_details.width / height / filesize are strings ("1200") or `false`
+	// - second attachment has `media_details: []` (empty PHP array instead of JSON object)
+	rawJSON := `[
+		{
+			"id": "771",
+			"date": "2026-11-10T10:00:00",
+			"slug": "broken-plugin-size",
+			"status": "inherit",
+			"type": "attachment",
+			"title": {"rendered": "Broken Size Mime", "protected": 0},
+			"author": "5",
+			"alt_text": false,
+			"media_type": "image",
+			"mime_type": "image/jpeg",
+			"post": false,
+			"source_url": "https://example.com/wp-content/uploads/2026/11/broken.jpg",
+			"media_details": {
+				"width": "1920",
+				"height": false,
+				"file": "2026/11/broken.jpg",
+				"filesize": "482910",
+				"sizes": {
+					"sp-found-01": {
+						"file": "broken-300x200.jpg",
+						"width": "300",
+						"height": 200,
+						"mime_type": false,
+						"source_url": "https://example.com/wp-content/uploads/2026/11/broken-300x200.jpg"
+					},
+					"corrupt-entry": false
+				}
+			}
+		},
+		{
+			"id": 772,
+			"slug": "empty-array-details",
+			"media_type": "file",
+			"mime_type": "application/zip",
+			"source_url": "https://example.com/wp-content/uploads/2026/11/archive.zip",
+			"media_details": []
+		}
+	]`
+
+	var items FlexSlice[MediaItem]
+	if err := json.Unmarshal([]byte(rawJSON), &items); err != nil {
+		t.Fatalf("expected polymorphic WP JSON to unmarshal cleanly, got error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 decoded MediaItems, got %d", len(items))
+	}
+	if items[0].ID != 771 || items[0].MediaDetails.FileSize != 482910 {
+		t.Errorf("unexpected item[0] coercion: ID=%d FileSize=%d", items[0].ID, items[0].MediaDetails.FileSize)
+	}
+	sz, ok := items[0].MediaDetails.Sizes["sp-found-01"]
+	if !ok || sz.Width != 300 || sz.MimeType != "" {
+		t.Errorf("unexpected size sp-found-01 coercion: %+v", sz)
+	}
+}
