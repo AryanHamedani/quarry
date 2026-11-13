@@ -159,12 +159,12 @@ func HTMLToMarkdown(rawHTML string) string {
 	return strings.TrimSpace(s)
 }
 
-// ExtractMediaURLsFromHTML finds all `<img src="...">`, `<video src="...">`, `<audio src="...">`, and `href` pointing to media assets in HTML.
+// ExtractMediaURLsFromHTML finds all `<img src="...">`, `<video src="...">`, `<audio src="...">`, and `href` pointing to media/archive/spreadsheet/document assets in HTML.
 func ExtractMediaURLsFromHTML(rawHTML string) []string {
 	if rawHTML == "" {
 		return nil
 	}
-	reSrc := regexp.MustCompile(`(?i)(?:src|href)=["'](https?://[^"']+\.(?:jpg|jpeg|png|gif|webp|avif|svg|mp4|webm|mp3|wav|ogg|pdf|zip))["']`)
+	reSrc := regexp.MustCompile(`(?i)(?:src|href)=["'](https?://[^"'?#]+\.(?:jpg|jpeg|png|gif|webp|avif|svg|mp4|webm|mp3|wav|ogg|pdf|zip|rar|7z|tar|gz|tgz|csv|tsv|xls|xlsx|ods|doc|docx|ppt|pptx|json|xml|sql|txt)(?:\?[^"']*)?)["']`)
 	matches := reSrc.FindAllStringSubmatch(rawHTML, -1)
 	seen := make(map[string]struct{}, len(matches))
 	var out []string

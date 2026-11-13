@@ -262,6 +262,7 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 		tagID      int
 		slug       string
 		mimeType   string
+		extFilter  string
 		perPage    int
 		maxPages   int
 		maxItems   int
@@ -272,7 +273,7 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 		Use:   "query <site-url...>",
 		Short: "Search, filter, and sort any WordPress REST API endpoint non-interactively",
 		Example: `  quarry query https://wordpress.org/news --resource posts --search "release" --format json
-  quarry query https://example.com --resource media --mime image/jpeg --all -f csv -o media.csv
+  quarry query https://example.com --resource media --ext zip,csv,excel --all -f csv -o files.csv
   quarry query https://example.com --resource posts --after 2025-01-01 --orderby modified --order desc`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sites, err := collectSiteURLs(args, gf.SitesFile)
@@ -295,6 +296,9 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 			qf.Before = before
 			qf.Slug = slug
 			qf.MimeType = mimeType
+			if extFilter != "" {
+				qf.Extensions = strings.Split(extFilter, ",")
+			}
 			if authorID > 0 {
 				qf.Author = []int{authorID}
 			}
@@ -421,7 +425,8 @@ func newQueryCmd(gf *GlobalFlags) *cobra.Command {
 	f.IntVar(&categoryID, "category", 0, "Filter by category ID")
 	f.IntVar(&tagID, "tag", 0, "Filter by tag ID")
 	f.StringVar(&slug, "slug", "", "Filter by exact item slug")
-	f.StringVar(&mimeType, "mime", "", "Filter media by MIME type (e.g. image/jpeg, application/pdf)")
+	f.StringVar(&mimeType, "mime", "", "Filter media by MIME type or comma-separated list (e.g. application/zip,text/csv)")
+	f.StringVarP(&extFilter, "ext", "e", "", "Filter media by extension/preset: zip,csv,excel,xls,xlsx,archive,spreadsheet,pdf,doc,json")
 	f.IntVar(&perPage, "per-page", 25, "Items per page (1..100)")
 	f.BoolVar(&allPages, "all", false, "Automatically paginate through all available pages")
 	f.IntVar(&maxPages, "max-pages", 0, "Maximum number of pages to fetch when --all is set (0 = unlimited)")
@@ -598,6 +603,7 @@ func newExportCmd(gf *GlobalFlags) *cobra.Command {
 func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 	var (
 		mimeType   string
+		extFilter  string
 		mediaType  string
 		search     string
 		flatLayout bool
@@ -608,8 +614,9 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "media <site-url...>",
-		Short: "Bulk-download media attachments (images, videos, audio, documents) via concurrent worker pool",
-		Example: `  quarry media https://example.com --concurrency 8 --output ./downloads
+		Short: "Bulk-download media attachments (images, archives, spreadsheets, videos, documents) via concurrent worker pool",
+		Example: `  quarry media https://example.com --ext zip,csv,excel --output ./downloads
+  quarry media https://example.com --concurrency 8 --output ./downloads
   quarry media https://example.com --mime image/webp --max-items 100`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sites, err := collectSiteURLs(args, gf.SitesFile)
@@ -631,6 +638,9 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 				qf := wp.DefaultQueryFilter("media")
 				qf.PerPage = 100
 				qf.MimeType = mimeType
+				if extFilter != "" {
+					qf.Extensions = strings.Split(extFilter, ",")
+				}
 				qf.MediaType = mediaType
 				qf.Search = search
 				qf.MaxPages = maxPages
@@ -688,8 +698,9 @@ func newMediaCmd(gf *GlobalFlags) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&mimeType, "mime", "", "Filter by MIME type (e.g. image/jpeg, image/png, application/pdf)")
-	cmd.Flags().StringVar(&mediaType, "type", "", "Filter by general media type (image, video, audio, application)")
+	cmd.Flags().StringVar(&mimeType, "mime", "", "Filter by MIME type or comma-separated list (e.g. application/zip,text/csv)")
+	cmd.Flags().StringVarP(&extFilter, "ext", "e", "", "Filter by extension/preset: zip,csv,excel,xls,xlsx,archive,spreadsheet,pdf,doc,json")
+	cmd.Flags().StringVar(&mediaType, "type", "", "Filter by general media type (image, video, audio, application, text)")
 	cmd.Flags().StringVarP(&search, "search", "s", "", "Search media titles/captions")
 	cmd.Flags().BoolVar(&flatLayout, "flat", false, "Save all files in a single flat folder instead of preserving year/month paths")
 	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Re-download and overwrite existing files")

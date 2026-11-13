@@ -122,6 +122,9 @@ quarry query https://wordpress.org/news \
 
 # Export the entire media catalog to CSV across all pages
 quarry query https://example.com --resource media --all --format csv --output media-catalog.csv
+
+# Find all ZIP archives, CSV files, and Excel spreadsheets (.xls, .xlsx) in the media library
+quarry query https://example.com --resource media --ext zip,csv,excel --all
 ```
 
 ### 4. Mass-Export an Entire Site (Content + Media)
@@ -138,6 +141,9 @@ quarry export https://wordpress.org/news \
 ### 5. Bulk-Download Media Library Assets
 
 ```bash
+# Download all ZIP, CSV, and Excel files across the site
+quarry media https://example.com --ext zip,csv,excel --output ./media-dump
+
 # Download all WebP/JPEG images with 12 concurrent workers and automatic resume
 quarry media https://example.com --type image --concurrency 12 --output ./media-dump
 ```

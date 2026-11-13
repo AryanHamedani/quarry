@@ -176,7 +176,7 @@ func NewModel(ctx context.Context, urls []string, clientOpts wp.ClientOptions, o
 	si.Width = 42
 
 	fi := textinput.New()
-	fi.Placeholder = "Filter syntax: after:2025-01-01 before:2026-12-31 author:1 per_page:50 slug:news"
+	fi.Placeholder = "Filter: ext:zip,csv,excel mime:application/pdf after:2025-01-01 author:1 per_page:50"
 	fi.CharLimit = 200
 	fi.Width = 65
 
@@ -824,6 +824,10 @@ func nextOption(curr string, opts []string) string {
 }
 
 func (m *Model) applyFilterDSL(input string) {
+	if strings.TrimSpace(input) == "" || strings.TrimSpace(input) == "clear" || strings.TrimSpace(input) == "reset" {
+		m.query = wp.DefaultQueryFilter(m.query.Endpoint)
+		return
+	}
 	tokens := strings.Fields(input)
 	for _, tok := range tokens {
 		parts := strings.SplitN(tok, ":", 2)
@@ -840,6 +844,8 @@ func (m *Model) applyFilterDSL(input string) {
 			m.query.Slug = v
 		case "mime":
 			m.query.MimeType = v
+		case "ext", "exts", "extension", "preset":
+			m.query.Extensions = strings.Split(v, ",")
 		case "type":
 			m.query.MediaType = v
 		case "orderby":

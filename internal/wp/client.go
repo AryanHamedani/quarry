@@ -568,16 +568,77 @@ func (c *Client) FetchPosts(ctx context.Context, q QueryFilter) ([]Post, PageMet
 }
 
 // FetchMedia queries `/wp/v2/media` for a single page.
+// If multiple MIME types or extension presets (e.g. zip,csv,excel) are specified, it queries and merges them cleanly.
 func (c *Client) FetchMedia(ctx context.Context, q QueryFilter) ([]MediaItem, PageMeta, error) {
 	q.Endpoint = "media"
 	q.Embed = false
-	var items []MediaItem
-	meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(q), &items)
-	if meta.TotalPages == 0 && len(items) > 0 {
-		meta.TotalPages = 1
-		meta.TotalItems = len(items)
+
+	apiMimes, matcher := ExpandMediaFilter(q.MimeType, q.Extensions)
+	if len(apiMimes) <= 1 {
+		qCopy := q
+		if len(apiMimes) == 1 {
+			qCopy.MimeType = apiMimes[0]
+		}
+		var items []MediaItem
+		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(qCopy), &items)
+		if err != nil {
+			return nil, meta, err
+		}
+		if matcher != nil {
+			filtered := make([]MediaItem, 0, len(items))
+			for _, it := range items {
+				if matcher(it) {
+					filtered = append(filtered, it)
+				}
+			}
+			items = filtered
+		}
+		if meta.TotalPages == 0 && len(items) > 0 {
+			meta.TotalPages = 1
+			meta.TotalItems = len(items)
+		}
+		return items, meta, nil
 	}
-	return items, meta, err
+
+	// Multiple MIME types requested (e.g. zip + csv + excel): query each and deduplicate by ID
+	seen := make(map[int]struct{})
+	var merged []MediaItem
+	var aggMeta PageMeta
+	aggMeta.Page = max(1, q.Page)
+	aggMeta.PerPage = max(25, q.PerPage)
+
+	for _, mime := range apiMimes {
+		qSub := q
+		qSub.MimeType = mime
+		qSub.Extensions = nil
+		var subItems []MediaItem
+		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(qSub), &subItems)
+		aggMeta.Latency += meta.Latency
+		if aggMeta.RequestURL == "" {
+			aggMeta.RequestURL = meta.RequestURL
+		}
+		if err != nil {
+			// Some WordPress setups reject unrecognized mime_type subtypes with 400; skip and continue
+			continue
+		}
+		aggMeta.TotalItems += meta.TotalItems
+		if meta.TotalPages > aggMeta.TotalPages {
+			aggMeta.TotalPages = meta.TotalPages
+		}
+		for _, it := range subItems {
+			if _, ok := seen[it.ID]; !ok {
+				if matcher == nil || matcher(it) {
+					seen[it.ID] = struct{}{}
+					merged = append(merged, it)
+				}
+			}
+		}
+	}
+	if aggMeta.TotalPages == 0 && len(merged) > 0 {
+		aggMeta.TotalPages = 1
+		aggMeta.TotalItems = len(merged)
+	}
+	return merged, aggMeta, nil
 }
 
 // FetchTerms queries `/wp/v2/categories`, `/wp/v2/tags`, or custom taxonomy rest_base.

@@ -307,8 +307,9 @@ type QueryFilter struct {
 	Page       int    // 1-indexed
 	Offset     int
 	Sticky     *bool
-	MimeType   string // for media: image, video, audio, application/pdf, etc.
-	MediaType  string // image, video, text, application, audio
+	MimeType   string   // for media: image, video, audio, application/pdf, or comma-separated list/presets
+	MediaType  string   // image, video, text, application, audio
+	Extensions []string // file extension or preset filter (e.g., zip, csv, xls, xlsx, excel, archive)
 	Parent     *int
 	Slug       string
 	Fields     []string // _fields projection

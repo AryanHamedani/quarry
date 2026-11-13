@@ -106,6 +106,12 @@ func (m *Model) renderTabsAndControls() string {
 	if m.query.Before != "" {
 		filterParts = append(filterParts, "before:"+m.query.Before)
 	}
+	if m.query.MimeType != "" {
+		filterParts = append(filterParts, "mime:"+m.query.MimeType)
+	}
+	if len(m.query.Extensions) > 0 {
+		filterParts = append(filterParts, "ext:"+strings.Join(m.query.Extensions, ","))
+	}
 	if len(m.selected) > 0 {
 		filterParts = append(filterParts, fmt.Sprintf("selected:%d", len(m.selected)))
 	}

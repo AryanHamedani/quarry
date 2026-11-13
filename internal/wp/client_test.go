@@ -161,3 +161,30 @@ func TestClientDiscoverAndPagination(t *testing.T) {
 		t.Errorf("unexpected first post title: %q", CleanPlainText(allPosts[0].Title.Rendered))
 	}
 }
+
+func TestExpandMediaFilterZipCSVExcel(t *testing.T) {
+	mimes, matcher := ExpandMediaFilter("", []string{"zip", "csv", "excel"})
+	if len(mimes) < 5 {
+		t.Fatalf("expected expanded MIME types for zip,csv,excel, got %v", mimes)
+	}
+	if matcher == nil {
+		t.Fatal("expected non-nil matcher")
+	}
+
+	items := []struct {
+		item MediaItem
+		want bool
+	}{
+		{MediaItem{ID: 1, MimeType: "application/zip", SourceURL: "https://example.com/uploads/backup.zip"}, true},
+		{MediaItem{ID: 2, MimeType: "text/csv", SourceURL: "https://example.com/uploads/report.csv"}, true},
+		{MediaItem{ID: 3, MimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", SourceURL: "https://example.com/uploads/q4.xlsx"}, true},
+		{MediaItem{ID: 4, MimeType: "application/octet-stream", SourceURL: "https://example.com/uploads/legacy.xls"}, true},
+		{MediaItem{ID: 5, MimeType: "image/jpeg", SourceURL: "https://example.com/uploads/photo.jpg"}, false},
+	}
+
+	for _, tc := range items {
+		if got := matcher(tc.item); got != tc.want {
+			t.Errorf("matcher(%+v) = %v, want %v", tc.item, got, tc.want)
+		}
+	}
+}
