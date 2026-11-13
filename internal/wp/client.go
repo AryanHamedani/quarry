@@ -567,27 +567,13 @@ func (c *Client) FetchPosts(ctx context.Context, q QueryFilter) ([]Post, PageMet
 	return items, meta, err
 }
 
-// FetchMedia queries `/wp/v2/media` for a single page.
-// If multiple MIME types, extension presets (e.g. zip,csv,excel), or excluded media types (e.g. --exclude-type image)
-// are specified, it queries and merges them cleanly.
+// FetchMedia queries `/wp/v2/media` for a single page (used in interactive TUI page-by-page browsing).
 func (c *Client) FetchMedia(ctx context.Context, q QueryFilter) ([]MediaItem, PageMeta, error) {
-	q.Endpoint = "media"
-	q.Embed = false
+	subQueries, matcher := ExpandMediaQueryPlan(q)
 
-	apiMimes, matcher := ExpandMediaFilter(q)
-	mediaTypes := ResolveRemainingMediaTypes(q.MediaType, q.ExcludeMediaTypes)
-
-	// Fast single-request path when at most 1 MIME type and at most 1 media_type are needed
-	if len(apiMimes) <= 1 && len(mediaTypes) <= 1 {
-		qCopy := q
-		if len(apiMimes) == 1 {
-			qCopy.MimeType = apiMimes[0]
-		}
-		if len(mediaTypes) == 1 {
-			qCopy.MediaType = mediaTypes[0]
-		}
+	if len(subQueries) == 1 {
 		var items []MediaItem
-		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(qCopy), &items)
+		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(subQueries[0]), &items)
 		if err != nil {
 			return nil, meta, err
 		}
@@ -607,36 +593,11 @@ func (c *Client) FetchMedia(ctx context.Context, q QueryFilter) ([]MediaItem, Pa
 		return items, meta, nil
 	}
 
-	// Multi-query fan-out: either across multiple MIME types OR across non-excluded media_type values
 	seen := make(map[int]struct{})
 	var merged []MediaItem
 	var aggMeta PageMeta
 	aggMeta.Page = max(1, q.Page)
 	aggMeta.PerPage = max(25, q.PerPage)
-
-	var subQueries []QueryFilter
-	if len(apiMimes) > 1 {
-		for _, mime := range apiMimes {
-			qSub := q
-			qSub.MimeType = mime
-			qSub.Extensions = nil
-			if len(mediaTypes) == 1 {
-				qSub.MediaType = mediaTypes[0]
-			} else {
-				qSub.MediaType = ""
-			}
-			subQueries = append(subQueries, qSub)
-		}
-	} else {
-		for _, mt := range mediaTypes {
-			qSub := q
-			qSub.MediaType = mt
-			if len(apiMimes) == 1 {
-				qSub.MimeType = apiMimes[0]
-			}
-			subQueries = append(subQueries, qSub)
-		}
-	}
 
 	for _, qSub := range subQueries {
 		var subItems []MediaItem
@@ -646,7 +607,6 @@ func (c *Client) FetchMedia(ctx context.Context, q QueryFilter) ([]MediaItem, Pa
 			aggMeta.RequestURL = meta.RequestURL
 		}
 		if err != nil {
-			// Some WordPress setups reject unrecognized mime_type/media_type values with 400; skip and continue
 			continue
 		}
 		aggMeta.TotalItems += meta.TotalItems
@@ -763,49 +723,112 @@ func (c *Client) FetchAllPosts(ctx context.Context, q QueryFilter, onProgress Pr
 }
 
 // FetchAllMedia automatically paginates through all media items matching QueryFilter.
+// Each expanded sub-query stream is paginated independently according to its own X-WP-TotalPages
+// so we never send out-of-range page requests to streams with fewer pages.
 func (c *Client) FetchAllMedia(ctx context.Context, q QueryFilter, onProgress ProgressCallback) ([]MediaItem, error) {
 	if q.PerPage <= 0 || q.PerPage < 50 {
 		q.PerPage = 100
 	}
-	q.Page = 1
+	subQueries, matcher := ExpandMediaQueryPlan(q)
 
-	firstPage, meta, err := c.FetchMedia(ctx, q)
-	if err != nil {
-		return nil, err
-	}
-	all := make([]MediaItem, 0, max(len(firstPage), meta.TotalItems))
-	all = append(all, firstPage...)
-	if onProgress != nil {
-		onProgress(1, max(1, meta.TotalPages), len(all), max(len(all), meta.TotalItems))
-	}
-	if q.MaxItems > 0 && len(all) >= q.MaxItems {
-		return all[:q.MaxItems], nil
-	}
+	seen := make(map[int]struct{})
+	var all []MediaItem
+	pagesDone := 0
+	totalPages := 0
+	totalExpectedItems := 0
 
-	totalPages := meta.TotalPages
-	if q.MaxPages > 0 && q.MaxPages < totalPages {
-		totalPages = q.MaxPages
+	type streamState struct {
+		sub        QueryFilter
+		totalPages int
 	}
-	for page := 2; page <= totalPages; page++ {
-		q.Page = page
-		items, _, err := c.FetchMedia(ctx, q)
+	var multiPageStreams []streamState
+
+	// Phase 1: Fetch page 1 of each sub-query stream to discover its exact pagination bounds
+	for i, sub := range subQueries {
+		sub.Page = 1
+		var items []MediaItem
+		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(sub), &items)
 		if err != nil {
-			if strings.Contains(err.Error(), "rest_post_invalid_page_number") {
-				break
+			if len(subQueries) == 1 {
+				return nil, err
 			}
-			return all, err
+			continue
 		}
-		if len(items) == 0 {
-			break
+
+		for _, it := range items {
+			if _, ok := seen[it.ID]; !ok {
+				if matcher == nil || matcher(it) {
+					seen[it.ID] = struct{}{}
+					all = append(all, it)
+				}
+			}
 		}
-		all = append(all, items...)
-		if onProgress != nil {
-			onProgress(page, totalPages, len(all), max(len(all), meta.TotalItems))
+
+		streamPages := meta.TotalPages
+		if streamPages == 0 && len(items) > 0 {
+			streamPages = 1
+		}
+		if q.MaxPages > 0 && streamPages > q.MaxPages {
+			streamPages = q.MaxPages
+		}
+
+		if streamPages > 0 {
+			pagesDone++
+			totalPages += streamPages
+			totalExpectedItems += max(len(items), meta.TotalItems)
+		}
+		if streamPages > 1 {
+			multiPageStreams = append(multiPageStreams, streamState{
+				sub:        sub,
+				totalPages: streamPages,
+			})
+		}
+
+		// Report progress as soon as single-stream or after probing streams
+		if onProgress != nil && (len(subQueries) == 1 || i == len(subQueries)-1) {
+			onProgress(max(1, pagesDone), max(1, totalPages), len(all), max(len(all), totalExpectedItems))
 		}
 		if q.MaxItems > 0 && len(all) >= q.MaxItems {
 			return all[:q.MaxItems], nil
 		}
 	}
+
+	// Phase 2: Paginate remaining pages (2..stream.totalPages) only for streams that actually have them
+	for _, st := range multiPageStreams {
+		for page := 2; page <= st.totalPages; page++ {
+			st.sub.Page = page
+			var items []MediaItem
+			_, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(st.sub), &items)
+			if err != nil {
+				if strings.Contains(err.Error(), "rest_post_invalid_page_number") {
+					break
+				}
+				if len(subQueries) == 1 {
+					return all, err
+				}
+				break
+			}
+			if len(items) == 0 {
+				break
+			}
+			for _, it := range items {
+				if _, ok := seen[it.ID]; !ok {
+					if matcher == nil || matcher(it) {
+						seen[it.ID] = struct{}{}
+						all = append(all, it)
+					}
+				}
+			}
+			pagesDone++
+			if onProgress != nil {
+				onProgress(pagesDone, max(pagesDone, totalPages), len(all), max(len(all), totalExpectedItems))
+			}
+			if q.MaxItems > 0 && len(all) >= q.MaxItems {
+				return all[:q.MaxItems], nil
+			}
+		}
+	}
+
 	return all, nil
 }
 

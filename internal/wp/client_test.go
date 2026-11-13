@@ -216,3 +216,84 @@ func TestExcludeMediaTypesAndRemainingTypes(t *testing.T) {
 		t.Error("expected application/pdf to be included")
 	}
 }
+
+func TestFetchAllMediaIndependentStreamPagination(t *testing.T) {
+	var invalidPageRequests int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/wp-json/wp/v2/media", func(w http.ResponseWriter, r *http.Request) {
+		mt := r.URL.Query().Get("media_type")
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			page, _ = strconv.Atoi(p)
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		switch mt {
+		case "file":
+			// 2 pages of files
+			w.Header().Set("X-WP-Total", "3")
+			w.Header().Set("X-WP-TotalPages", "2")
+			if page == 1 {
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{"id": 1, "media_type": "file", "mime_type": "application/zip", "source_url": "https://example.com/1.zip"},
+					{"id": 2, "media_type": "file", "mime_type": "application/pdf", "source_url": "https://example.com/2.pdf"},
+				})
+				return
+			}
+			if page == 2 {
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{"id": 3, "media_type": "file", "mime_type": "text/csv", "source_url": "https://example.com/3.csv"},
+				})
+				return
+			}
+			invalidPageRequests++
+			w.WriteHeader(http.StatusBadRequest)
+		case "video":
+			// Only 1 page of videos! Requesting page 2 here would be a bug.
+			w.Header().Set("X-WP-Total", "1")
+			w.Header().Set("X-WP-TotalPages", "1")
+			if page == 1 {
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{"id": 4, "media_type": "video", "mime_type": "video/mp4", "source_url": "https://example.com/4.mp4"},
+				})
+				return
+			}
+			invalidPageRequests++
+			w.WriteHeader(http.StatusBadRequest)
+		default:
+			// 0 items for audio, text, application
+			w.Header().Set("X-WP-Total", "0")
+			w.Header().Set("X-WP-TotalPages", "0")
+			if page > 1 {
+				invalidPageRequests++
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	opts := DefaultClientOptions()
+	opts.RequestsPerSec = 0
+	cli, err := NewClient(srv.URL, opts)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	qf := DefaultQueryFilter("media")
+	qf.ExcludeMediaTypes = []string{"image"}
+
+	items, err := cli.FetchAllMedia(context.Background(), qf, nil)
+	if err != nil {
+		t.Fatalf("FetchAllMedia failed: %v", err)
+	}
+	if len(items) != 4 {
+		t.Fatalf("expected 4 items across disjoint streams, got %d", len(items))
+	}
+	if invalidPageRequests > 0 {
+		t.Errorf("expected 0 out-of-bounds page requests across sub-streams, got %d", invalidPageRequests)
+	}
+}

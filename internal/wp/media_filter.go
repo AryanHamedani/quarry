@@ -258,6 +258,55 @@ func ExpandMediaFilter(q QueryFilter) (apiMimes []string, matcher func(MediaItem
 	return apiMimes, matcher
 }
 
+// ExpandMediaQueryPlan compiles a QueryFilter into:
+//  1. A slice of disjoint sub-queries (`subQueries`) where each sub-query maps 1-to-1 to a single
+//     WordPress REST API collection stream with its own independent pagination (`X-WP-TotalPages`).
+//  2. A deterministic `matcher` predicate that enforces all inclusion and exclusion rules on returned items.
+func ExpandMediaQueryPlan(q QueryFilter) (subQueries []QueryFilter, matcher func(MediaItem) bool) {
+	apiMimes, matcher := ExpandMediaFilter(q)
+	mediaTypes := ResolveRemainingMediaTypes(q.MediaType, q.ExcludeMediaTypes)
+
+	base := q
+	base.Endpoint = "media"
+	base.Embed = false
+
+	if len(apiMimes) > 1 {
+		for _, mime := range apiMimes {
+			sub := base
+			sub.MimeType = mime
+			sub.Extensions = nil
+			if len(mediaTypes) == 1 {
+				sub.MediaType = mediaTypes[0]
+			} else {
+				sub.MediaType = ""
+			}
+			subQueries = append(subQueries, sub)
+		}
+		return subQueries, matcher
+	}
+
+	if len(mediaTypes) > 1 {
+		for _, mt := range mediaTypes {
+			sub := base
+			sub.MediaType = mt
+			if len(apiMimes) == 1 {
+				sub.MimeType = apiMimes[0]
+			}
+			subQueries = append(subQueries, sub)
+		}
+		return subQueries, matcher
+	}
+
+	single := base
+	if len(apiMimes) == 1 {
+		single.MimeType = apiMimes[0]
+	}
+	if len(mediaTypes) == 1 {
+		single.MediaType = mediaTypes[0]
+	}
+	return []QueryFilter{single}, matcher
+}
+
 // ResolveRemainingMediaTypes returns the subset of AllWPMediaTypes not excluded by excludeTypes,
 // allowing Quarry to query non-excluded `media_type` endpoints directly on WordPress without scanning excluded types (e.g. skipping 10,000 images).
 func ResolveRemainingMediaTypes(includeMediaType string, excludeTypes []string) []string {

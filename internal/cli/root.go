@@ -20,7 +20,7 @@ import (
 )
 
 // Version is injected at build time via -ldflags.
-var Version = "0.2.0"
+var Version = "0.2.1"
 
 type GlobalFlags struct {
 	SitesFile   string
@@ -771,8 +771,43 @@ func printSizeEstimate(siteURL string, est downloader.SizeEstimate) {
 	}
 	if len(est.ByTypeCounts) > 0 {
 		fmt.Println("  Breakdown by MIME    :")
+
+		type mimeRow struct {
+			mime  string
+			count int
+			bytes int64
+		}
+		rows := make([]mimeRow, 0, len(est.ByTypeCounts))
+		maxMimeLen := 0
 		for mime, cnt := range est.ByTypeCounts {
-			fmt.Printf("    • %-45s %4d files  (%s)\n", mime, cnt, downloader.FormatBytes(est.ByTypeBytes[mime]))
+			if len(mime) > maxMimeLen {
+				maxMimeLen = len(mime)
+			}
+			rows = append(rows, mimeRow{
+				mime:  mime,
+				count: cnt,
+				bytes: est.ByTypeBytes[mime],
+			})
+		}
+		// Sort deterministically: largest total bytes first, then by file count, then alphabetically
+		for i := 0; i < len(rows); i++ {
+			for j := i + 1; j < len(rows); j++ {
+				if rows[j].bytes > rows[i].bytes ||
+					(rows[j].bytes == rows[i].bytes && rows[j].count > rows[i].count) ||
+					(rows[j].bytes == rows[i].bytes && rows[j].count == rows[i].count && rows[j].mime < rows[i].mime) {
+					rows[i], rows[j] = rows[j], rows[i]
+				}
+			}
+		}
+		if maxMimeLen < 24 {
+			maxMimeLen = 24
+		}
+		for _, r := range rows {
+			unit := "files"
+			if r.count == 1 {
+				unit = "file "
+			}
+			fmt.Printf("    • %-*s  %4d %s  (%s)\n", maxMimeLen, r.mime, r.count, unit, downloader.FormatBytes(r.bytes))
 		}
 	}
 	fmt.Println()
