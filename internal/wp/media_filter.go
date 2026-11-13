@@ -216,7 +216,7 @@ func ExpandMediaFilter(q QueryFilter) (apiMimes []string, matcher func(MediaItem
 
 	matcher = func(item MediaItem) bool {
 		if len(dirScopes) > 0 {
-			if !MatchesDirectoryScope(item.SourceURL, item.MediaDetails.File, item.Type+" "+item.AltText, dirScopes) {
+			if !MatchesDirectoryScope(item.SourceURL, item.MediaDetails.File, item.MediaType+" "+item.Type+" "+item.AltText+" "+item.Link, dirScopes) {
 				return false
 			}
 		}

@@ -20,7 +20,7 @@ import (
 )
 
 // Version is injected at build time via -ldflags.
-var Version = "0.3.0"
+var Version = "0.3.1"
 
 type GlobalFlags struct {
 	SitesFile    string
@@ -972,7 +972,7 @@ func newDirsCmd(gf *GlobalFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Calculate and display total file count and download size without downloading")
 	cmd.Flags().BoolVar(&flatLayout, "flat", false, "Save all files in a single flat folder instead of preserving relative paths")
 	cmd.Flags().BoolVar(&noResume, "no-resume", false, "Re-download and overwrite existing files")
-	cmd.Flags().IntVar(&maxPages, "max-pages", 10, "Maximum REST media pages to scan alongside directory crawling (0 = all)")
+	cmd.Flags().IntVar(&maxPages, "max-pages", 0, "Maximum REST media pages to scan alongside directory crawling (0 = automatic)")
 	cmd.Flags().IntVar(&maxItems, "max-items", 0, "Maximum number of items to return/download (0 = unlimited)")
 
 	return cmd

@@ -366,10 +366,22 @@ func TestCookieHeaderAuthenticationAndDirectories(t *testing.T) {
 	}
 
 	const expectedCookie = "wordpress_logged_in_xyz=secret_session; wp_woocommerce_session_1=abc"
-	var sawCookieOnAPI, sawCookieOnDir bool
+	const expectedNonce = "a9b8c7d6e5"
+	var sawCookieOnAPI, sawNonceOnAPI, sawCookieOnDir bool
 
 	mux := http.NewServeMux()
 	var baseURL string
+
+	// WordPress core rest-nonce endpoint
+	mux.HandleFunc("/wp-admin/admin-ajax.php", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("action") == "rest-nonce" && r.Header.Get("Cookie") == expectedCookie {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(expectedNonce))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("0"))
+	})
 
 	mux.HandleFunc("/wp-content/uploads/woocommerce_uploads/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Cookie") == expectedCookie {
@@ -406,6 +418,9 @@ func TestCookieHeaderAuthenticationAndDirectories(t *testing.T) {
 		if r.Header.Get("Cookie") == expectedCookie {
 			sawCookieOnAPI = true
 		}
+		if r.Header.Get("X-WP-Nonce") == expectedNonce {
+			sawNonceOnAPI = true
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-WP-Total", "1")
 		_ = json.NewEncoder(w).Encode([]map[string]any{
@@ -419,8 +434,56 @@ func TestCookieHeaderAuthenticationAndDirectories(t *testing.T) {
 		})
 	})
 
+	mux.HandleFunc("/wp-json/wp/v2/edd-downloads", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-WP-Total", "1")
+		w.Header().Set("X-WP-TotalPages", "1")
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":      601,
+				"slug":    "supermarket-directory",
+				"status":  "publish",
+				"type":    "download",
+				"link":    baseURL + "/downloads/supermarket-directory/",
+				"title":   map[string]any{"rendered": "بانک اطلاعات سوپرمارکت ها"},
+				"content": map[string]any{"rendered": `<p>Demo file: <a href="` + baseURL + `/wp-content/uploads/edd/2026/02/demo-supermarket.xlsx">demo-supermarket.xlsx</a></p>`},
+				"excerpt": map[string]any{"rendered": ""},
+			},
+		})
+	})
+
 	mux.HandleFunc("/wp-json/wp/v2/media", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// Simulate WordPress Core behavior: ?search=edd only searches post_title/post_content, NOT source_url or _wp_attached_file!
+		if s := r.URL.Query().Get("search"); s == "edd" || s == "woocommerce_uploads" {
+			w.Header().Set("X-WP-Total", "0")
+			w.Header().Set("X-WP-TotalPages", "0")
+			_ = json.NewEncoder(w).Encode([]any{})
+			return
+		}
+		if r.URL.Query().Get("media_type") == "video" {
+			w.Header().Set("X-WP-Total", "1")
+			w.Header().Set("X-WP-TotalPages", "1")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"id":         701,
+					"slug":       "video-supermarket",
+					"status":     "inherit",
+					"type":       "attachment",
+					"link":       baseURL + "/downloads/supermarket-directory/video-supermarket/",
+					"title":      map[string]any{"rendered": "ویدیو بانک اطلاعات سوپرمارکت"},
+					"media_type": "video",
+					"mime_type":  "video/mp4",
+					"post":       601,
+					"source_url": baseURL + "/wp-content/uploads/2026/02/Video-Supermarket.mp4",
+					"media_details": map[string]any{
+						"file":     "2026/02/Video-Supermarket.mp4",
+						"filesize": 4194304,
+					},
+				},
+			})
+			return
+		}
 		w.Header().Set("X-WP-Total", "0")
 		w.Header().Set("X-WP-TotalPages", "0")
 		_ = json.NewEncoder(w).Encode([]any{})
@@ -440,11 +503,11 @@ func TestCookieHeaderAuthenticationAndDirectories(t *testing.T) {
 
 	// 1. Test ProbeDirectories
 	probes := cli.ProbeDirectories(context.Background())
-	if len(probes) < 2 || !probes[0].AutoIndex || !probes[0].APIAvailable {
-		t.Fatalf("expected WooCommerce directory probe to report AutoIndex=true and APIAvailable=true, got %+v", probes)
+	if len(probes) < 2 || !probes[0].AutoIndex || !probes[0].APIAvailable || !probes[1].APIAvailable || probes[1].APIEndpoint != "/wp/v2/edd-downloads" {
+		t.Fatalf("expected WooCommerce & EDD directory probes to report AutoIndex=true and APIAvailable=true (/wp/v2/edd-downloads), got %+v", probes)
 	}
 
-	// 2. Test ScanDirectories with ExcludeMediaTypes=["image"] (should return 4 non-image files: xlsx, csv, zip from EDD, zip from WC product)
+	// 2. Test ScanDirectories with ExcludeMediaTypes=["image"] (should return 6 non-image files: xlsx, csv, zip from EDD autoindex, zip from WC product, xlsx from EDD CPT, mp4 attached to EDD download)
 	qf := DefaultQueryFilter("woocommerce")
 	qf.DirectoryScopes = []string{"wc", "edd"}
 	qf.ExcludeMediaTypes = []string{"image"}
@@ -453,11 +516,12 @@ func TestCookieHeaderAuthenticationAndDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanDirectories: %v", err)
 	}
-	if !sawCookieOnAPI || !sawCookieOnDir {
-		t.Errorf("expected Cookie header to be sent on both REST API (%v) and directory crawler (%v)", sawCookieOnAPI, sawCookieOnDir)
+	if !sawCookieOnAPI || !sawNonceOnAPI || !sawCookieOnDir {
+		t.Errorf("expected Cookie + auto-resolved X-WP-Nonce on REST API (cookie=%v, nonce=%v) and Cookie on directory crawler (%v)",
+			sawCookieOnAPI, sawNonceOnAPI, sawCookieOnDir)
 	}
-	if len(items) != 4 {
-		t.Fatalf("expected 4 non-image files across WooCommerce & EDD directories/APIs, got %d: %+v", len(items), items)
+	if len(items) != 6 {
+		t.Fatalf("expected 6 non-image files across WooCommerce & EDD directories/APIs, got %d: %+v", len(items), items)
 	}
 
 	// 3. Test Search filter inside ScanDirectories
@@ -465,5 +529,17 @@ func TestCookieHeaderAuthenticationAndDirectories(t *testing.T) {
 	searched, _, err := cli.ScanDirectories(context.Background(), qf, nil)
 	if err != nil || len(searched) != 1 || !strings.HasSuffix(searched[0].SourceURL, "vip-customers.csv") {
 		t.Fatalf("expected search 'vip-customers' to return 1 CSV item, got %+v (err=%v)", searched, err)
+	}
+	if searched[0].MediaDetails.FileSize != 512*1024 {
+		t.Errorf("expected parsed autoindex size 524288 bytes (512K), got %d", searched[0].MediaDetails.FileSize)
+	}
+	if searched[0].Date.Time.Year() != 2026 {
+		t.Errorf("expected parsed autoindex modification date in 2026, got %v", searched[0].Date.Time)
+	}
+
+	// 4. Test FetchPosts fallback for 'product' when /wp/v2/product returns 404
+	prodPosts, _, err := cli.FetchPosts(context.Background(), DefaultQueryFilter("product"))
+	if err != nil || len(prodPosts) != 1 || prodPosts[0].ID != 501 {
+		t.Fatalf("expected FetchPosts('product') to fall back to /wc/store/v1/products, got %+v (err=%v)", prodPosts, err)
 	}
 }

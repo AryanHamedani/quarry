@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -77,10 +78,14 @@ type PoolOptions struct {
 
 func decorateDownloadRequest(req *http.Request, opts PoolOptions) {
 	req.Header.Set("User-Agent", opts.UserAgent)
+	if req.URL != nil && req.URL.Scheme != "" && req.URL.Host != "" {
+		req.Header.Set("Referer", req.URL.Scheme+"://"+req.URL.Host+"/")
+	}
 	if c := strings.TrimSpace(opts.CookieHeader); c != "" {
 		if strings.HasPrefix(strings.ToLower(c), "cookie:") {
 			c = strings.TrimSpace(c[len("cookie:"):])
 		}
+		c = strings.Trim(c, "\"'")
 		if c != "" {
 			req.Header.Set("Cookie", c)
 		}
@@ -305,6 +310,23 @@ func downloadOne(ctx context.Context, client *http.Client, task AssetTask, opts 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		res.Err = fmt.Errorf("HTTP %d for %s", resp.StatusCode, task.SourceURL)
 		return res
+	}
+
+	// If the URL was a dynamic WooCommerce/EDD download link (e.g. ?download_file=... or ?eddfile=...)
+	// and the server provided a Content-Disposition filename, use that filename.
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, err := mime.ParseMediaType(cd); err == nil {
+			if fn := strings.TrimSpace(params["filename"]); fn != "" {
+				safeFn := filepath.Base(strings.ReplaceAll(fn, "\\", "/"))
+				if safeFn != "" && safeFn != "." && safeFn != "/" {
+					base := filepath.Base(dest)
+					if strings.HasPrefix(base, "media-") || base == "index.php" {
+						dest = filepath.Join(filepath.Dir(dest), safeFn)
+						res.LocalPath = dest
+					}
+				}
+			}
+		}
 	}
 
 	tmpPath := dest + ".part"

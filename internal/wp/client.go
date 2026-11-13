@@ -51,6 +51,10 @@ type Client struct {
 	rateMu   sync.Mutex
 	lastTick time.Time
 	minDelay time.Duration
+
+	nonceMu           sync.Mutex
+	resolvedNonce     string
+	nonceProbedCookie string
 }
 
 // NormalizeSiteURL normalizes a user-provided domain or URL into a clean base origin/path.
@@ -128,9 +132,17 @@ func (c *Client) APIRoot() string { return c.apiRoot }
 
 // SetCookieHeader updates the live Cookie header value used for all subsequent requests.
 func (c *Client) SetCookieHeader(rawCookie string) {
+	norm := NormalizeCookieValue(rawCookie)
 	c.rateMu.Lock()
-	c.opts.CookieHeader = NormalizeCookieValue(rawCookie)
+	c.opts.CookieHeader = norm
 	c.rateMu.Unlock()
+
+	c.nonceMu.Lock()
+	if c.nonceProbedCookie != norm {
+		c.resolvedNonce = ""
+		c.nonceProbedCookie = ""
+	}
+	c.nonceMu.Unlock()
 }
 
 // CookieHeader returns the normalized Cookie header value currently configured on the client.
@@ -138,6 +150,16 @@ func (c *Client) CookieHeader() string {
 	c.rateMu.Lock()
 	defer c.rateMu.Unlock()
 	return NormalizeCookieValue(c.opts.CookieHeader)
+}
+
+// EffectiveNonce returns either the explicitly configured WPNonce or the auto-discovered cookie REST nonce.
+func (c *Client) EffectiveNonce() string {
+	if explicit := strings.TrimSpace(c.opts.WPNonce); explicit != "" {
+		return explicit
+	}
+	c.nonceMu.Lock()
+	defer c.nonceMu.Unlock()
+	return c.resolvedNonce
 }
 
 func (c *Client) waitRateLimit(ctx context.Context) error {
@@ -205,8 +227,11 @@ func (c *Client) decorateRequest(req *http.Request) {
 	}
 	if cookie := c.CookieHeader(); cookie != "" {
 		req.Header.Set("Cookie", cookie)
+		if req.Header.Get("Referer") == "" {
+			req.Header.Set("Referer", c.baseURL+"/")
+		}
 	}
-	if nonce := strings.TrimSpace(c.opts.WPNonce); nonce != "" {
+	if nonce := c.EffectiveNonce(); nonce != "" {
 		req.Header.Set("X-WP-Nonce", nonce)
 	}
 	for k, v := range c.opts.CustomHeaders {
@@ -214,16 +239,93 @@ func (c *Client) decorateRequest(req *http.Request) {
 	}
 }
 
-// NormalizeCookieValue cleans a user-pasted Cookie header value, stripping any accidental leading "Cookie:" prefix.
+var (
+	reValidNonce     = regexp.MustCompile(`^[a-zA-Z0-9]{6,32}$`)
+	reHTMLRestNonce  = regexp.MustCompile(`(?i)(?:wpApiSettings|wcSettings)[^;]*?"nonce"\s*:\s*"([a-zA-Z0-9]{6,32})"`)
+	reFetchMiddleware = regexp.MustCompile(`(?i)createNonceMiddleware\(\s*["']([a-zA-Z0-9]{6,32})["']\s*\)`)
+)
+
+// NormalizeCookieValue cleans a user-pasted Cookie header value, stripping any accidental leading "Cookie:" prefix,
+// "-H" curl flags, or surrounding quotes.
 func NormalizeCookieValue(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return ""
 	}
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", " ")
+	if strings.HasPrefix(s, "-H ") || strings.HasPrefix(s, "--header ") {
+		s = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(s, "-H "), "--header "))
+	}
+	s = strings.Trim(s, "\"'")
 	if strings.HasPrefix(strings.ToLower(s), "cookie:") {
 		s = strings.TrimSpace(s[len("cookie:"):])
 	}
-	return s
+	return strings.Trim(s, "\"' ")
+}
+
+// ensureCookieNonce automatically exchanges a WordPress logged-in Cookie header for a `wp_rest`
+// X-WP-Nonce token via `/wp-admin/admin-ajax.php?action=rest-nonce` (or HTML wpApiSettings fallback).
+// WordPress Core requires X-WP-Nonce alongside `wordpress_logged_in_*` cookies to authenticate REST API calls.
+func (c *Client) ensureCookieNonce(ctx context.Context) {
+	cookie := c.CookieHeader()
+	if cookie == "" || strings.TrimSpace(c.opts.WPNonce) != "" {
+		return
+	}
+	c.nonceMu.Lock()
+	if c.nonceProbedCookie == cookie {
+		c.nonceMu.Unlock()
+		return
+	}
+	c.nonceProbedCookie = cookie
+	c.nonceMu.Unlock()
+
+	// Only probe if the cookie actually contains a WordPress/WooCommerce session or auth token
+	// (though probing admin-ajax.php?action=rest-nonce is lightweight and safe for any cookie).
+	ajaxURL := c.baseURL + "/wp-admin/admin-ajax.php?action=rest-nonce"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ajaxURL, nil)
+	if err == nil {
+		req.Header.Set("User-Agent", c.opts.UserAgent)
+		req.Header.Set("Cookie", cookie)
+		req.Header.Set("Referer", c.baseURL+"/")
+		if resp, err := c.httpClient.Do(req); err == nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			_ = resp.Body.Close()
+			candidate := strings.TrimSpace(string(body))
+			if resp.StatusCode == http.StatusOK && candidate != "0" && candidate != "-1" && reValidNonce.MatchString(candidate) {
+				c.nonceMu.Lock()
+				c.resolvedNonce = candidate
+				c.nonceMu.Unlock()
+				return
+			}
+		}
+	}
+
+	// Fallback: inspect homepage / wp-admin HTML for localized wpApiSettings.nonce or createNonceMiddleware
+	if strings.Contains(strings.ToLower(cookie), "wordpress_logged_in") {
+		req2, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/", nil)
+		if err == nil {
+			req2.Header.Set("User-Agent", c.opts.UserAgent)
+			req2.Header.Set("Cookie", cookie)
+			if resp2, err := c.httpClient.Do(req2); err == nil {
+				htmlBytes, _ := io.ReadAll(io.LimitReader(resp2.Body, 512*1024))
+				_ = resp2.Body.Close()
+				htmlStr := string(htmlBytes)
+				if m := reHTMLRestNonce.FindStringSubmatch(htmlStr); len(m) > 1 {
+					c.nonceMu.Lock()
+					c.resolvedNonce = m[1]
+					c.nonceMu.Unlock()
+					return
+				}
+				if m := reFetchMiddleware.FindStringSubmatch(htmlStr); len(m) > 1 {
+					c.nonceMu.Lock()
+					c.resolvedNonce = m[1]
+					c.nonceMu.Unlock()
+					return
+				}
+			}
+		}
+	}
 }
 
 func (c *Client) doWithRetry(ctx context.Context, targetURL string) (*http.Response, time.Duration, error) {
@@ -282,6 +384,7 @@ var reHTMLAPILink = regexp.MustCompile(`(?i)<link[^>]+rel=["']https://api\.w\.or
 
 // Discover probes the site to locate its WordPress REST API root, site metadata, custom post types, and taxonomies.
 func (c *Client) Discover(ctx context.Context) (*SiteProfile, error) {
+	c.ensureCookieNonce(ctx)
 	// 1. Try standard /wp-json/
 	prettyURL := c.baseURL + "/wp-json/"
 	resp, latency, err := c.doWithRetry(ctx, prettyURL)
@@ -452,6 +555,7 @@ func (c *Client) enrichProfile(ctx context.Context, profile *SiteProfile) {
 
 // GetJSON performs a GET request to a WordPress REST API route, decodes JSON into target, and extracts pagination headers.
 func (c *Client) GetJSON(ctx context.Context, route string, params url.Values, target any) (PageMeta, error) {
+	c.ensureCookieNonce(ctx)
 	reqURL := c.BuildEndpointURL(route, params)
 	resp, latency, err := c.doWithRetry(ctx, reqURL)
 	if err != nil {
@@ -601,19 +705,49 @@ func joinInts(nums []int) string {
 }
 
 // FetchPosts queries `/wp/v2/<endpoint>` (posts, pages, or custom post type) for a single page.
+// For WooCommerce ("product"/"products") and Easy Digital Downloads ("download"/"downloads"/"edd-downloads"),
+// if the `/wp/v2/` CPT route is disabled or 404s, it transparently falls back to `/wc/store/v1/products`, `/wp/v2/edd-downloads`, or `/?edd-api=products`.
 func (c *Client) FetchPosts(ctx context.Context, q QueryFilter) ([]Post, PageMeta, error) {
-	endpoint := q.Endpoint
+	endpoint := strings.ToLower(strings.TrimSpace(q.Endpoint))
 	if endpoint == "" {
 		endpoint = "posts"
+	}
+	if endpoint == "products" {
+		endpoint = "product"
+	} else if endpoint == "downloads" {
+		endpoint = "download"
 	}
 	route := "/wp/v2/" + strings.TrimLeft(endpoint, "/")
 	var items FlexSlice[Post]
 	meta, err := c.GetJSON(ctx, route, BuildQueryValues(q), &items)
+	if err != nil {
+		if endpoint == "product" {
+			if wcPosts, wcMeta, wcErr := c.fetchWooCommerceStoreProductsAsPosts(ctx, q); wcErr == nil {
+				return wcPosts, wcMeta, nil
+			}
+		} else if endpoint == "download" || endpoint == "edd-downloads" {
+			altRoute := "/wp/v2/edd-downloads"
+			if endpoint == "edd-downloads" {
+				altRoute = "/wp/v2/download"
+			}
+			if altMeta, altErr := c.GetJSON(ctx, altRoute, BuildQueryValues(q), &items); altErr == nil {
+				if altMeta.TotalPages == 0 && len(items) > 0 {
+					altMeta.TotalPages = 1
+					altMeta.TotalItems = len(items)
+				}
+				return items, altMeta, nil
+			}
+			if eddPosts, eddMeta, eddErr := c.fetchEDDProductsAsPosts(ctx, q); eddErr == nil {
+				return eddPosts, eddMeta, nil
+			}
+		}
+		return items, meta, err
+	}
 	if meta.TotalPages == 0 && len(items) > 0 {
 		meta.TotalPages = 1
 		meta.TotalItems = len(items)
 	}
-	return items, meta, err
+	return items, meta, nil
 }
 
 // FetchMedia queries `/wp/v2/media` for a single page (used in interactive TUI page-by-page browsing).
@@ -794,16 +928,20 @@ func (c *Client) FetchAllMedia(ctx context.Context, q QueryFilter, onProgress Pr
 	var multiPageStreams []streamState
 
 	// Phase 1: Fetch page 1 of each sub-query stream to discover its exact pagination bounds
+	var lastErr error
+	succeededStreams := 0
 	for i, sub := range subQueries {
 		sub.Page = 1
 		var items FlexSlice[MediaItem]
 		meta, err := c.GetJSON(ctx, "/wp/v2/media", BuildQueryValues(sub), &items)
 		if err != nil {
+			lastErr = err
 			if len(subQueries) == 1 {
 				return nil, err
 			}
 			continue
 		}
+		succeededStreams++
 
 		for _, it := range items {
 			if _, ok := seen[it.ID]; !ok {
@@ -841,6 +979,10 @@ func (c *Client) FetchAllMedia(ctx context.Context, q QueryFilter, onProgress Pr
 		if q.MaxItems > 0 && len(all) >= q.MaxItems {
 			return all[:q.MaxItems], nil
 		}
+	}
+
+	if succeededStreams == 0 && lastErr != nil {
+		return nil, lastErr
 	}
 
 	// Phase 2: Paginate remaining pages (2..stream.totalPages) only for streams that actually have them
