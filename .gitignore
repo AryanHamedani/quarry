@@ -1,0 +1,18 @@
+# Binaries & build artifacts
+/bin/
+/dist/
+/quarry
+*.exe
+*.out
+*.test
+
+# Extracted data & media outputs
+/quarry-output/
+/archive/
+/downloads/
+
+# OS & editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp

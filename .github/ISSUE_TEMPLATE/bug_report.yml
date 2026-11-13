@@ -1,0 +1,38 @@
+name: Bug Report
+description: Report a bug or unexpected behavior when scraping or exploring a WordPress site
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue with **Quarry**!
+  - type: input
+    id: version
+    attributes:
+      label: Quarry Version
+      description: Output of `quarry --version`
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: target_site
+    attributes:
+      label: Target WordPress URL (if public)
+      description: The WordPress site URL where the issue occurred
+      placeholder: "https://example.com"
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce / Command Run
+      description: Exact command or TUI steps that triggered the bug
+      placeholder: |
+        quarry query https://example.com --resource posts --all
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. Actual Behavior
+      validations:
+        required: true

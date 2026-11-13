@@ -1,0 +1,19 @@
+name: Feature Request
+description: Suggest an enhancement, export format, or REST API capability for Quarry
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: What workflow or WordPress REST API task are you trying to accomplish?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: How should Quarry work in the TUI or CLI?
+    validations:
+      required: true
